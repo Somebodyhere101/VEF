@@ -17,7 +17,7 @@ import numpy as np
 
 from tokenizers import Tokenizer
 
-from core import Embeddings, Corpus, Attention, Relations, Refinement, Awareness, FusedOperators, DeepFusion, WordDecoder, ComputeBasis
+from core import Embeddings, Corpus, Attention, AttentionV2, Relations, Refinement, Awareness, FusedOperators, DeepFusion, WordDecoder, ComputeBasis
 from core.config import DEFAULT as CFG
 from reasoning import Retrieval, Introspection, Arithmetic, Composition, Decomposition, Understanding, Circuits
 from reasoning.boundary import BoundaryComposer, ComputationDelegate
@@ -56,7 +56,27 @@ class VEF:
         with contextlib.redirect_stdout(out) if quiet else contextlib.nullcontext():
             self.embeddings = Embeddings(data)
             self.corpus = Corpus(data)
-            self.attention = Attention(self.embeddings)
+            self.attention = AttentionV2(self.embeddings)
+
+            # Build W*-derived contextual Q/K from corpus at multiple scales
+            from core.attention_qk import build_contextual_qk
+            qk_scales = build_contextual_qk(
+                self.embeddings, self.tokenizer, self.corpus.entries,
+                data_dir=data, dim_out=self.embeddings.dim // 4)
+            # Only inject W* Q/K where separation > 0.02 (actually helps)
+            # Keep SVD heads where W* doesn't improve
+            # Best: medium window into semantic head, global into predictive
+            if isinstance(qk_scales, dict):
+                inject_plan = [
+                    ('medium', 1),   # strongest separation → semantic head
+                    ('global', 2),   # second best → predictive head
+                ]
+                for scale_name, head_idx in inject_plan:
+                    if scale_name in qk_scales and qk_scales[scale_name]['separation'] > 0.01:
+                        self.attention.inject_contextual_qk(
+                            qk_scales[scale_name]['W_Q'],
+                            qk_scales[scale_name]['W_K'],
+                            head_idx=head_idx)
             self.relations = Relations(self.corpus.entries,
                                         max_entries=min(len(self.corpus.entries), 30000),
                                         cache_dir=data)

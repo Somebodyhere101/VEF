@@ -26,7 +26,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class AttentionV2:
     """Multi-head attention from co-occurrence structure."""
 
-    def __init__(self, embeddings, n_heads=4, n_layers=2):
+    def __init__(self, embeddings, n_heads=4, n_layers=4):
         self.n_heads = n_heads
         self.n_layers = n_layers
         self.dim = embeddings.dim
@@ -39,6 +39,10 @@ class AttentionV2:
 
         # Compute U, S, Vt from the embedding matrix
         U, S, Vt = np.linalg.svd(E_sub, full_matrices=False)
+
+        # Try loading W*-derived contextual Q/K
+        self._contextual_wq = None
+        self._contextual_wk = None
 
         # Build specialized heads
         self.W_Q = []
@@ -66,14 +70,44 @@ class AttentionV2:
         print(f"  Attention V2: {n_heads} heads × {n_layers} layers, "
               f"dim={self.dim}, head_dim={self.head_dim}")
 
+    def inject_contextual_qk(self, W_Q_ctx, W_K_ctx, head_idx=1):
+        """Replace a head's Q/K with W*-derived contextual projections.
+
+        The W*-derived Q/K are computed from corpus co-occurrence via
+        ridge regression — they capture what tokens ACTUALLY attend to
+        in context, not an arbitrary SVD rotation.
+        """
+        if W_Q_ctx is None or W_K_ctx is None:
+            return
+
+        # Replace the specified head
+        self.W_Q[head_idx] = torch.tensor(W_Q_ctx, dtype=torch.float32, device=DEVICE)
+        self.W_K[head_idx] = torch.tensor(W_K_ctx, dtype=torch.float32, device=DEVICE)
+
+        # Rebuild stacked tensors
+        self.W_Q_stacked = torch.stack(self.W_Q)
+        self.W_K_stacked = torch.stack(self.W_K)
+
+        self._contextual_wq = W_Q_ctx
+        self._contextual_wk = W_K_ctx
+        print(f"  Injected contextual Q/K into head {head_idx}")
+
     def _build_head(self, head_idx, E, U, S, Vt):
         """Build Q/K/V for a specialized head.
 
-        Each head captures a different type of token relationship:
-          0: Local syntax (nearby tokens matter most)
-          1: Semantic similarity (meaning-based attention)
-          2: Functional role (what role does this token play)
-          3: Contrastive (attend to DIFFERENT tokens for discrimination)
+        Key insight: Q and K should be DIFFERENT projections so that
+        attention computes "what does token A need from token B" rather
+        than "are A and B similar."
+
+        In gradient-trained transformers, Q learns "what I'm looking for"
+        and K learns "what I offer." They're different because the loss
+        pushes them apart.
+
+        Without gradients, we create asymmetry via:
+          Head 0 (Syntactic): Q = top SVD, K = shifted SVD band → local structure
+          Head 1 (Semantic):  Q = S-weighted SVD, K = cross-covariance rotation → meaning
+          Head 2 (Predictive): Q = forward SVD, K = backward SVD → what predicts what
+          Head 3 (Discriminative): Q = full, K = residual after removing shared → differences
         """
         d = self.dim
         hd = self.head_dim
@@ -81,55 +115,62 @@ class AttentionV2:
         e = s + hd
 
         if head_idx == 0:
-            # SYNTACTIC HEAD: Q and K from adjacent SVD dimensions
-            # Adjacent SVD dimensions capture local co-occurrence patterns
-            # Q projects into the "what do I need syntactically" space
-            # K projects into the "what do I offer syntactically" space
+            # SYNTACTIC: Q asks "what's my local structure?"
+            # K answers from a DIFFERENT part of the spectrum
             wq = Vt[s:e, :].T.copy()
-            # K uses REVERSED order of same dimensions — creates asymmetry
-            # so that subject attends to verb, verb to object, etc.
-            wk = Vt[s:e, :][::-1].T.copy()
-            # V: direct embedding slice
+            # Shift K by half the spectrum — maximizes Q/K decorrelation
+            shift = d // 2
+            ks = (s + shift) % d
+            ke = ks + hd
+            if ke <= d:
+                wk = Vt[ks:ke, :].T.copy()
+            else:
+                wk = np.vstack([Vt[ks:, :], Vt[:ke - d, :]]).T.copy()
             wv = (np.diag(S[s:e]) @ Vt[s:e, :]).T.copy()
             wv /= np.maximum(np.linalg.norm(wv, axis=0, keepdims=True), 1e-10)
 
         elif head_idx == 1:
-            # SEMANTIC HEAD: Q and K emphasize high-variance dimensions
-            # The top singular values capture the most important semantic axes
-            # Weight by singular values to emphasize meaning
+            # SEMANTIC: Q weighted by importance (S), K rotated for asymmetry
             sq = np.diag(S[s:e] / (S[s:e].max() + 1e-10))
             wq = (Vt[s:e, :].T @ sq).copy()
-            # K: same weighting but different rotation
+            # K: orthogonal rotation of the S-weighted projection
+            # This means Q·K is NOT just cosine similarity — it's a
+            # learned-free bilinear form
             rot = self._random_orthogonal(hd, seed=42 + head_idx)
             wk = (Vt[s:e, :].T @ sq @ rot).copy()
-            # V: information-preserving projection
             wv = Vt[s:e, :].T.copy()
 
         elif head_idx == 2:
-            # FUNCTIONAL HEAD: Q and K from cross-covariance
-            # Different parts of the SVD capture different functional roles
-            # Use SVD dimensions that are ORTHOGONAL to head 0 and 1
+            # PREDICTIVE: Q = "what do I predict?", K = "what predicts me?"
+            # Achieved by using SVD of E^T E (gram matrix) for Q
+            # and SVD of E E^T (covariance) mapped back for K
+            # The asymmetry is: gram captures token→token, covariance captures dim→dim
             wq = Vt[s:e, :].T.copy()
-            # K: project through the ANTI-correlation structure
-            # Tokens with opposite signs in certain dimensions have
-            # complementary roles (e.g., modifier↔noun, operator↔operand)
-            wk = -Vt[s:e, :][::-1].T.copy()
+            # K from U (left singular vectors) projected back to embedding space
+            # U captures how tokens distribute across the latent space
+            # This makes K attend based on distributional role, not surface similarity
+            U_slice = U[:, s:e]  # (vocab, hd)
+            # Project U back through V to get a (dim, hd) projection
+            # W_k = V @ U_slice^T @ U_slice — captures how embedding dims
+            # relate to token distributions
+            gram = U_slice.T @ U_slice  # (hd, hd)
+            wk = (Vt[s:e, :].T @ gram).copy()
+            wk /= np.maximum(np.linalg.norm(wk, axis=0, keepdims=True), 1e-10)
             wv = (np.diag(np.sqrt(np.abs(S[s:e]))) @ Vt[s:e, :]).T.copy()
             wv /= np.maximum(np.linalg.norm(wv, axis=0, keepdims=True), 1e-10)
 
         else:
-            # CONTRASTIVE HEAD: attend to what's DIFFERENT
-            # Q: what am I? K: what contrasts with me?
-            # This creates attention that highlights novel/surprising tokens
+            # DISCRIMINATIVE: attend to what's DIFFERENT
+            # Q: full projection. K: projection with dominant directions removed.
+            # Q·K is high when tokens differ along important axes.
             wq = Vt[s:e, :].T.copy()
-            # K: the residual after projecting out the dominant direction
-            # This makes tokens attend to what they DON'T share
-            dominant = Vt[0:1, :].T  # First singular vector
             wk_full = Vt[s:e, :].T.copy()
-            # Remove the dominant direction from K
-            for i in range(hd):
-                proj = np.dot(wk_full[:, i], dominant[:, 0]) * dominant[:, 0]
-                wk_full[:, i] -= proj
+            # Remove top-3 dominant directions from K
+            for r in range(min(3, s)):
+                dominant = Vt[r:r+1, :].T  # (dim, 1)
+                for i in range(hd):
+                    proj = np.dot(wk_full[:, i], dominant[:, 0]) * dominant[:, 0]
+                    wk_full[:, i] -= 0.5 * proj  # partial removal — keeps some signal
             wk = wk_full
             wk /= np.maximum(np.linalg.norm(wk, axis=0, keepdims=True), 1e-10)
             wv = Vt[s:e, :].T.copy()
@@ -198,10 +239,12 @@ class AttentionV2:
             # Attention scores with relative position bias
             scores = torch.bmm(Q, K.transpose(1, 2)) / (self.head_dim ** 0.5)
 
-            # Add position bias per head
+            # Add position bias per head — weaker in deeper layers
+            # so early layers capture position, later layers capture meaning
+            layer_decay_scale = 1.0 + layer * 0.5  # position bias fades
             for h in range(min(self.n_heads, len(head_decays))):
-                decay = head_decays[h]
-                pos_bias = -rel_dist / decay  # nearby=0, far=negative
+                decay = head_decays[h] * layer_decay_scale
+                pos_bias = -rel_dist / decay
                 scores[h] = scores[h] + pos_bias
 
             if mask is not None:
@@ -213,7 +256,9 @@ class AttentionV2:
             head_outs = torch.bmm(attn, V)
             concat = head_outs.permute(1, 0, 2).reshape(n, -1)
 
-            # Residual + layer norm
-            H = F.layer_norm(H + concat @ self.W_O, [self.dim])
+            # Residual with increasing mixing — deeper layers contribute more context
+            alpha = 0.3 + 0.1 * layer  # 0.3, 0.4, 0.5, 0.6...
+            attn_out = concat @ self.W_O
+            H = F.layer_norm((1 - alpha) * H + alpha * attn_out, [self.dim])
 
         return H
