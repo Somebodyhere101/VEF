@@ -22,7 +22,7 @@ parser.add_argument('--no-reasoning', action='store_true',
 parser.add_argument('--system', type=str, default=None,
                     help='Custom system prompt')
 parser.add_argument('-h', '--help', action='store_true')
-args, _ = parser.parse_known_args()
+args = parser.parse_args()
 
 if args.data:
     import model as m

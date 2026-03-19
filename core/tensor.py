@@ -97,12 +97,13 @@ class TensorEmbeddings:
                 mode_embeds[k] = base_embeddings.raw[:V]
                 continue
 
-            # Build co-occurrence for this mode
-            cooc = np.zeros((V, V), dtype=np.float32)
+            # Build co-occurrence for this mode (sparse)
             sample = entries[:min(50000, len(entries))]  # cap for speed
             batch_texts = [corpus_entries[i] for i in sample]
             encodings = tokenizer.encode_batch(batch_texts)
 
+            cooc_rows = []
+            cooc_cols = []
             for enc in encodings:
                 ids = np.array(enc.ids, dtype=np.int64)
                 ids = ids[(ids >= 0) & (ids < V)]
@@ -112,14 +113,21 @@ class TensorEmbeddings:
                 for offset in range(1, window + 1):
                     if offset >= n:
                         break
-                    rows = ids[:n-offset]
-                    cols = ids[offset:]
-                    np.add.at(cooc, (rows, cols), 1.0)
-                    np.add.at(cooc, (cols, rows), 1.0)
+                    r = ids[:n-offset]
+                    c = ids[offset:]
+                    cooc_rows.append(r)
+                    cooc_cols.append(c)
+                    cooc_rows.append(c)
+                    cooc_cols.append(r)
 
-            # PPMI (vectorized)
-            M = sparse.csr_matrix(cooc)
-            del cooc
+            if cooc_rows:
+                all_rows = np.concatenate(cooc_rows)
+                all_cols = np.concatenate(cooc_cols)
+                all_data = np.ones(len(all_rows), dtype=np.float32)
+                M = sparse.coo_matrix((all_data, (all_rows, all_cols)),
+                                      shape=(V, V)).tocsr()
+            else:
+                M = sparse.csr_matrix((V, V), dtype=np.float32)
             total = M.sum()
             if total < 100:
                 mode_embeds[k] = base_embeddings.raw[:V]
@@ -148,7 +156,7 @@ class TensorEmbeddings:
                 norms = np.linalg.norm(emb, axis=1, keepdims=True)
                 norms[norms == 0] = 1
                 mode_embeds[k] = emb / norms
-            except:
+            except Exception:
                 mode_embeds[k] = base_embeddings.raw[:V]
 
             print(f"    Mode {k}: SVD done")
@@ -168,10 +176,10 @@ class TensorEmbeddings:
             acc = np.zeros(d, dtype=np.float64)
             count = 0
             for enc in encodings:
-                ids = [t for t in enc.ids if 0 <= t < V]
-                if not ids:
+                ids = np.array([t for t in enc.ids if 0 <= t < V])
+                if len(ids) == 0:
                     continue
-                w = np.array([idf[t] for t in ids])
+                w = idf[ids]
                 total_w = w.sum()
                 if total_w < 1e-10:
                     continue

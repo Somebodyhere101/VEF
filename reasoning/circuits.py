@@ -135,15 +135,21 @@ class Circuits:
                 'does','did','than','then','just','very','because','your','our'}
 
         count = 0
-        for text in self.corpus.entries:
-            if concept_lower in text.lower():
-                resp = self.corpus.extract_response(text)
-                words = set(re.findall(r'[a-z]{3,}', resp.lower())) - stop - {concept_lower}
-                for w in words:
-                    word_counts[w] += 1
-                count += 1
-                if count >= max_entries:
-                    break
+        # Use word_index to find candidate entries instead of linear scan
+        candidate_indices = []
+        if concept_lower in self.corpus.word_index:
+            candidate_indices = sorted(self.corpus.word_index[concept_lower])
+        for idx in candidate_indices:
+            if idx >= len(self.corpus.entries):
+                continue
+            text = self.corpus.entries[idx]
+            resp = self.corpus.extract_response(text)
+            words = set(re.findall(r'[a-z]{3,}', resp.lower())) - stop - {concept_lower}
+            for w in words:
+                word_counts[w] += 1
+            count += 1
+            if count >= max_entries:
+                break
 
         return [w for w, _ in word_counts.most_common(20)]
 

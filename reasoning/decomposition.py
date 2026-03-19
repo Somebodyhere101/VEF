@@ -26,5 +26,5 @@ class Decomposition:
     def split(self, query):
         """Split a compound query into sub-queries."""
         parts = self.SPLIT_PATTERN.split(query)
-        clean = [p.strip().strip('.,;') for p in parts if len(p.strip()) > 5]
+        clean = [p.strip().strip('.,;') for p in parts if len(p.strip()) > 3]
         return clean if len(clean) > 1 else [query]

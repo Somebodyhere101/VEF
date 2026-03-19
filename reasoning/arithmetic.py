@@ -14,6 +14,14 @@ from collections import Counter
 
 class Arithmetic:
 
+    NUM_WORDS = {
+        'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
+        'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
+        'ten': 10, 'eleven': 11, 'twelve': 12, 'thirteen': 13,
+        'fourteen': 14, 'fifteen': 15, 'sixteen': 16, 'seventeen': 17,
+        'eighteen': 18, 'nineteen': 19, 'twenty': 20,
+    }
+
     def __init__(self, corpus_entries, cache_dir=None):
         import os, pickle
         if cache_dir:
@@ -31,13 +39,7 @@ class Arithmetic:
         """Try to solve an arithmetic query. Returns answer string or None."""
         lower = query.lower()
 
-        num_words = {
-            'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
-            'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
-            'ten': 10, 'eleven': 11, 'twelve': 12, 'thirteen': 13,
-            'fourteen': 14, 'fifteen': 15, 'sixteen': 16, 'seventeen': 17,
-            'eighteen': 18, 'nineteen': 19, 'twenty': 20,
-        }
+        num_words = self.NUM_WORDS
 
         has_digit = bool(re.search(r'\d', query))
         has_num_word = any(w in lower.split() for w in num_words)
@@ -88,7 +90,11 @@ class Arithmetic:
                 elif op == '*':
                     result = result * nums[i]
                 elif op == '/':
-                    result = result // nums[i] if nums[i] != 0 else None
+                    if nums[i] != 0:
+                        result = result / nums[i]
+                        result = int(result) if result == int(result) else result
+                    else:
+                        result = None
                 if result is None:
                     return None, None
                 steps.append(f"{prev} {sym} {nums[i]} = {result}")
@@ -112,7 +118,11 @@ class Arithmetic:
             elif op == '*':
                 result = a * b
             elif op == '/':
-                result = a // b if b != 0 else None
+                if b != 0:
+                    result = a / b
+                    result = int(result) if result == int(result) else result
+                else:
+                    result = None
             else:
                 return None, None
             if result is not None:
@@ -158,6 +168,13 @@ class Arithmetic:
 
     @staticmethod
     def _add(a, b):
+        # Handle negative numbers by detecting sign, working with abs values
+        if a < 0 and b < 0:
+            return -Arithmetic._add(-a, -b)
+        if a < 0:
+            return b - (-a)
+        if b < 0:
+            return a - (-b)
         sa, sb = str(a), str(b)
         maxlen = max(len(sa), len(sb))
         sa, sb = sa.zfill(maxlen), sb.zfill(maxlen)

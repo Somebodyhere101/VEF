@@ -9,6 +9,7 @@ above random, the model knows it doesn't know.
 Also handles typo correction: when confidence is low, the model
 searches for visually similar known words (edit distance).
 """
+import math
 import re
 import numpy as np
 import torch
@@ -22,6 +23,17 @@ class Introspection:
         self.embeddings = embeddings
         self.corpus = corpus
         self.tokenizer = tokenizer
+        # Pre-bucketed index by (word_length, first_char) for fast spell correction
+        self._spell_buckets = {}
+        for known in self.corpus.word_index:
+            if len(known) >= 1:
+                for length_offset in range(-2, 3):
+                    bucket_len = len(known) + length_offset
+                    if bucket_len > 0:
+                        key = (bucket_len, known[0])
+                        if key not in self._spell_buckets:
+                            self._spell_buckets[key] = []
+                        self._spell_buckets[key].append(known)
 
     def measure_confidence(self, query, best_response, best_score):
         """How confident is the model that this response answers the query?
@@ -65,9 +77,10 @@ class Introspection:
             candidates = []
             word_chars = set(word)
 
-            for known in self.corpus.word_index:
-                if abs(len(known) - len(word)) > 2:
-                    continue
+            # Use pre-bucketed index: only check words with same length and first char
+            bucket_key = (len(word), word[0] if word else '')
+            bucket_candidates = self._spell_buckets.get(bucket_key, [])
+            for known in bucket_candidates:
                 if len(word_chars & set(known)) < len(word) // 2:
                     continue
                 dist = self._edit_distance(word, known)
@@ -79,7 +92,6 @@ class Introspection:
                 # Score: distance penalized, frequency rewarded.
                 # A very common word at dist=2 beats a rare word at dist=1.
                 # score = -dist + log2(freq)/10
-                import math
                 scored = []
                 for dist, freq, w in candidates:
                     s = -dist + math.log2(max(freq, 1)) / 5.0

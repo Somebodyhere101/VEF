@@ -38,6 +38,7 @@ class Refinement:
         thought = query
         trace = []
         prev_emb = None
+        step = 0
 
         for step in range(max_steps):
             emb = self.embeddings.embed(thought, self.tokenizer)
@@ -81,6 +82,7 @@ class Refinement:
                 self.corpus.entries[refined_idx[0].item()])
 
             if refined_entry and len(refined_entry) > 10:
+                match = refined_entry
                 key_words = self._extract_focus(match[:100])
                 thought = f"{query} {key_words}"
 

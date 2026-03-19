@@ -32,6 +32,7 @@ class Retrieval:
         self._system_entries = []
         self._resp_embeds = None
         self._conv_mask = None
+        self._conv_indices = None
 
     def _load_conv_mask(self):
         """Load conversation mask for quality filtering."""
@@ -117,7 +118,7 @@ class Retrieval:
                 top_idx = cand_idx[top_local]
             else:
                 # No content words or too few candidates — full search
-                if use_conv_only and hasattr(self, '_conv_indices'):
+                if use_conv_only and self._conv_indices is not None:
                     qq_scores = self.corpus.q_embeds[self._conv_indices] @ q_t
                     k = min(top_k * 4, len(self._conv_indices))
                     top_qq, top_local = qq_scores.topk(k)
@@ -126,7 +127,7 @@ class Retrieval:
                     qq_scores = self.corpus.q_embeds @ q_t
                     top_qq, top_idx = qq_scores.topk(min(top_k * 4, len(qq_scores)))
         else:
-            if use_conv_only and hasattr(self, '_conv_indices'):
+            if use_conv_only and self._conv_indices is not None:
                 qq_scores = self.corpus.q_embeds[self._conv_indices] @ q_t
                 k = min(top_k * 4, len(self._conv_indices))
                 top_qq, top_local = qq_scores.topk(k)
@@ -163,6 +164,8 @@ class Retrieval:
         w_rb = 0.85 - 0.60 * confidence
         w_rs = 0.05 - 0.10 * confidence
         w_rs = max(0.0, w_rs)
+        w_total = w_qq + w_rb + w_rs
+        w_qq, w_rb, w_rs = w_qq / w_total, w_rb / w_total, w_rs / w_total
 
         # Normalize signals to same scale before combining.
         # Without this, Q-Q (~0.9 range) dominates RB (~0.5 range)

@@ -5,6 +5,7 @@ Meaning is captured through co-occurrence: words appearing in similar
 contexts get similar embeddings. IDF ensures content words dominate
 over structural words ("gravity" matters more than "the").
 """
+import functools
 import numpy as np
 import os
 import torch
@@ -36,12 +37,16 @@ class Embeddings:
         With attention: contextual — word order and relationships matter.
         "bank near river" gets a different embedding than "bank near money."
         """
+        # LRU cache for static embeddings (no attention) — the #1 perf optimization
+        if attention is None:
+            return self._embed_static_cached(text, tokenizer)
+
         ids = [t for t in tokenizer.encode(text).ids if 0 <= t < self.vocab_size]
         if not ids:
             return None
 
         # Contextual: run attention, then IDF-weighted pool
-        if attention is not None and len(ids) >= 3:
+        if len(ids) >= 3:
             ctx = attention.contextualize(ids, self.E, causal=False)
             # IDF-weighted pool over contextualized representations
             weights = self.idf_t[torch.tensor(ids, device=ctx.device)]
@@ -52,16 +57,23 @@ class Embeddings:
             emb = emb / (emb.norm() + 1e-10)
             return emb.cpu().numpy().astype(np.float32)
 
-        # Static: IDF-weighted average (fast)
-        emb = np.zeros(self.dim, dtype=np.float64)
-        total_weight = 0.0
-        for tid in ids:
-            w = float(self.idf[tid])
-            emb += w * self.raw[tid]
-            total_weight += w
+        # Fewer than 3 tokens with attention — fall back to static
+        return self._embed_static_cached(text, tokenizer)
 
+    @functools.lru_cache(maxsize=4096)
+    def _embed_static_cached(self, text, tokenizer):
+        """Cached static IDF-weighted embedding."""
+        ids = [t for t in tokenizer.encode(text).ids if 0 <= t < self.vocab_size]
+        if not ids:
+            return None
+
+        # Vectorized static embedding
+        ids_arr = np.array(ids)
+        weights = self.idf[ids_arr]
+        total_weight = weights.sum()
         if total_weight < 1e-10:
             return None
+        emb = (self.raw[ids_arr] * weights[:, None]).sum(axis=0).astype(np.float64)
         emb /= total_weight
         norm = np.linalg.norm(emb)
         if norm < 1e-10:

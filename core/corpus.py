@@ -70,4 +70,4 @@ class Corpus:
             word_idf = np.log(self.n_entries / max(n_docs, 1))
             if word_idf > structural_threshold:
                 words.add(w)
-        return words
+        return sorted(words)

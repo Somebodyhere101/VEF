@@ -25,6 +25,11 @@ COMPARISON = {'than'}
 ALL_CONNECTORS = CONTRAST | AGREEMENT | SEQUENCE | COMPARISON | {'and', 'is', 'are'}
 
 
+_RE_OPPOSITE = re.compile(r'opposite\s+of\s+(\w{3,})\b.*?\b(?:is|are)\s+(\w{3,})')
+_RE_SEASON_AFTER = re.compile(r'(?:season|day|month)\s+after\s+(\w{3,})\b.*?\b(?:is|are|called)\s+(\w{3,})')
+_RE_IS_SEASON_AFTER = re.compile(r'(\w{3,})\s+is\s+the\s+season\s+after\s+(\w{3,})')
+
+
 class Relations:
 
     def __init__(self, corpus_entries, max_entries=30000, cache_dir=None):
@@ -53,7 +58,7 @@ class Relations:
         self.frame_fillers = defaultdict(set)
         self.pairs = defaultdict(Counter)
         self.ordered_pairs = defaultdict(Counter)
-        self.categories = {}
+        self.categories = defaultdict(list)
 
         self._corpus_entries = corpus_entries  # keep ref for full-corpus mining
         self._scan(corpus_entries, max_entries)
@@ -102,19 +107,19 @@ class Relations:
                 if words[i+1] in ('is', 'are') and words[i+2] in ('a', 'an', 'the'):
                     a, b = words[i], words[i+3]
                     if len(a) >= 3 and len(b) >= 3:
-                        self.categories[a] = b
+                        self.categories[a].append(b)
 
             # Direct antonym statements: "opposite of X is Y"
-            for m in re.finditer(r'opposite\s+of\s+(\w{3,})\b.*?\b(?:is|are)\s+(\w{3,})', text.lower()):
+            for m in _RE_OPPOSITE.finditer(text.lower()):
                 a, b = m.group(1), m.group(2)
                 if a != b:
                     pair = tuple(sorted([a, b]))
                     self.pairs[pair]['opposite_stated'] += 1
 
             # "after X comes Y" / "X is the season after Y"
-            for m in re.finditer(r'(?:season|day|month)\s+after\s+(\w{3,})\b.*?\b(?:is|are|called)\s+(\w{3,})', text.lower()):
+            for m in _RE_SEASON_AFTER.finditer(text.lower()):
                 self.ordered_pairs[(m.group(1), m.group(2))]['after_stated'] += 1
-            for m in re.finditer(r'(\w{3,})\s+is\s+the\s+season\s+after\s+(\w{3,})', text.lower()):
+            for m in _RE_IS_SEASON_AFTER.finditer(text.lower()):
                 self.ordered_pairs[(m.group(2), m.group(1))]['after_stated'] += 1
 
     def _derive(self):
@@ -264,7 +269,9 @@ class Relations:
                     sims = self._embeddings.normed @ target
                     # Exclude the word itself and very common tokens
                     best_idx = None
-                    for idx in np.argsort(-sims)[:20]:
+                    top_indices = np.argpartition(-sims, 20)[:20]
+                    top_indices = top_indices[np.argsort(-sims[top_indices])]
+                    for idx in top_indices:
                         # Decode token
                         decoded = self._tokenizer.decode([idx]).strip().lower()
                         decoded = decoded.replace('Ġ', '').strip()

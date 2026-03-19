@@ -127,7 +127,10 @@ def build_tokenizer(texts, V, output_dir):
         log("Tokenizer exists, loading...")
         tok = Tokenizer.from_file(path)
         tok.decoder = BLDec()
-        return tok
+        if tok.get_vocab_size() != V:
+            log(f"Vocab size mismatch: cached={tok.get_vocab_size()}, requested={V}. Rebuilding...")
+        else:
+            return tok
     t0 = time.time()
     step(f"Train BPE tokenizer (V={V})")
     tok = Tokenizer(BPE())
@@ -159,7 +162,13 @@ def build_embeddings(texts, tok, V, d, output_dir):
     idf_path = os.path.join(output_dir, 'idf_weights.npy')
     if os.path.exists(emb_path) and os.path.exists(idf_path):
         log("Embeddings exist, loading...")
-        return np.load(emb_path), np.load(idf_path)
+        cached_emb = np.load(emb_path)
+        cached_idf = np.load(idf_path)
+        if cached_emb.shape[1] != d:
+            log(f"Embedding dim mismatch: cached={cached_emb.shape[1]}, requested={d}. Rebuilding...")
+            del cached_emb, cached_idf
+        else:
+            return cached_emb, cached_idf
 
     from scipy import sparse
 
@@ -168,7 +177,8 @@ def build_embeddings(texts, tok, V, d, output_dir):
 
     # === CO-OCCURRENCE (GPU scatter_add, large batches) ===
     step(f"Co-occurrence matrix (V={V}, window={window}, GPU={HAS_GPU})")
-    if HAS_GPU:
+    use_gpu_dense = HAS_GPU and V <= 30000
+    if use_gpu_dense:
         cooc_gpu = torch.zeros(V, V, dtype=torch.float32, device=DEVICE)
         cooc_flat = cooc_gpu.view(-1)
     else:
@@ -184,7 +194,7 @@ def build_embeddings(texts, tok, V, d, output_dir):
 
         # Per-text: compute flat co-occurrence indices in numpy (fast, vectorized)
         # Accumulate ALL pairs from the batch, then ONE GPU scatter
-        all_flat_fwd, all_flat_bwd = [], []
+        all_flat_fwd, all_flat_bwd, all_weights = [], [], []
         for enc in encodings:
             ids = np.array(enc.ids, dtype=np.int64)
             ids = ids[(ids >= 0) & (ids < V)]
@@ -198,22 +208,25 @@ def build_embeddings(texts, tok, V, d, output_dir):
             for offset in range(1, window + 1):
                 if offset >= n:
                     break
-                if HAS_GPU:
+                weight = 1.0 / offset
+                if use_gpu_dense:
                     all_flat_fwd.append(ids[:n-offset] * V + ids[offset:])
                     all_flat_bwd.append(ids[offset:] * V + ids[:n-offset])
+                    n_pairs = n - offset
+                    all_weights.append(np.full(n_pairs, weight, dtype=np.float32))
                 else:
-                    weight = 1.0 / offset
                     for r, c in zip(ids[:n-offset], ids[offset:]):
                         cooc[(int(r), int(c))] += weight
                         cooc[(int(c), int(r))] += weight
 
         # ONE GPU scatter per batch (not per text)
-        if HAS_GPU and all_flat_fwd:
+        if use_gpu_dense and all_flat_fwd:
             flat_fwd = torch.tensor(np.concatenate(all_flat_fwd), dtype=torch.long, device=DEVICE)
             flat_bwd = torch.tensor(np.concatenate(all_flat_bwd), dtype=torch.long, device=DEVICE)
-            cooc_flat.scatter_add_(0, flat_fwd, torch.ones(len(flat_fwd), device=DEVICE))
-            cooc_flat.scatter_add_(0, flat_bwd, torch.ones(len(flat_bwd), device=DEVICE))
-            del flat_fwd, flat_bwd
+            weights_t = torch.tensor(np.concatenate(all_weights), dtype=torch.float32, device=DEVICE)
+            cooc_flat.scatter_add_(0, flat_fwd, weights_t)
+            cooc_flat.scatter_add_(0, flat_bwd, weights_t)
+            del flat_fwd, flat_bwd, weights_t
 
         progress(min(batch_start + batch_size, len(texts)), len(texts),
                  f"{n_tokens/1e6:.0f}M tokens", interval=10)
@@ -223,7 +236,7 @@ def build_embeddings(texts, tok, V, d, output_dir):
     # === PPMI (vectorized — no Python loop) ===
     t1 = time.time()
     step("PPMI (vectorized, no Python loops)")
-    if HAS_GPU:
+    if use_gpu_dense:
         cooc_cpu = cooc_gpu.cpu().numpy()
         rows, cols = np.nonzero(cooc_cpu)
         data = cooc_cpu[rows, cols].astype(np.float64)

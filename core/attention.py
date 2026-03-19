@@ -21,6 +21,9 @@ class Attention:
         self.n_heads = n_heads
         self.n_layers = n_layers
         self.dim = embeddings.dim
+        if self.dim % n_heads != 0:
+            raise ValueError(
+                f"Embedding dimension {self.dim} must be divisible by n_heads {n_heads}")
         self.head_dim = self.dim // n_heads
 
         E = embeddings.raw[:min(embeddings.vocab_size, 20000)]
@@ -49,6 +52,11 @@ class Attention:
             wv = (np.diag(S[s:e]) @ Vt[s:e, :]).T
             wv = wv / np.maximum(np.linalg.norm(wv, axis=0, keepdims=True), 1e-10)
             self.W_V.append(torch.tensor(wv.astype(np.float32), device=DEVICE))
+
+        # Stack W_Q, W_K, W_V for batched multi-head attention
+        self.W_Q_stacked = torch.stack(self.W_Q)  # (n_heads, dim, head_dim)
+        self.W_K_stacked = torch.stack(self.W_K)  # (n_heads, dim, head_dim)
+        self.W_V_stacked = torch.stack(self.W_V)  # (n_heads, dim, head_dim)
 
         self.W_O = torch.tensor(Vt.T.astype(np.float32), device=DEVICE)
 
@@ -88,17 +96,19 @@ class Attention:
             mask = torch.triu(torch.full((n, n), -1e9, device=DEVICE), diagonal=1)
 
         for _ in range(self.n_layers):
-            head_outs = []
-            for h in range(self.n_heads):
-                Q = H @ self.W_Q[h]
-                K = H @ self.W_K[h]
-                V = H @ self.W_V[h]
-                scores = (Q @ K.T) / (self.head_dim ** 0.5)
-                if mask is not None:
-                    scores = scores + mask
-                head_outs.append(F.softmax(scores, dim=1) @ V)
-
-            concat = torch.cat(head_outs, dim=1)
+            # Batched multi-head projections: (n_heads, n, head_dim)
+            Q = torch.einsum('nd,hdk->hnk', H, self.W_Q_stacked)
+            K = torch.einsum('nd,hdk->hnk', H, self.W_K_stacked)
+            V = torch.einsum('nd,hdk->hnk', H, self.W_V_stacked)
+            # Attention scores: (n_heads, n, n)
+            scores = torch.bmm(Q, K.transpose(1, 2)) / (self.head_dim ** 0.5)
+            if mask is not None:
+                scores = scores + mask.unsqueeze(0)
+            attn = F.softmax(scores, dim=2)
+            # Weighted values: (n_heads, n, head_dim)
+            head_outs = torch.bmm(attn, V)
+            # Concatenate heads: (n, n_heads * head_dim)
+            concat = head_outs.permute(1, 0, 2).reshape(n, -1)
             H = F.layer_norm(H + concat @ self.W_O, [self.dim])
 
         return H

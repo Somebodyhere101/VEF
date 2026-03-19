@@ -84,8 +84,10 @@ def f1_score(pred, gold):
     """Token-level F1."""
     pred_tokens = normalize(pred).split()
     gold_tokens = normalize(gold).split()
+    if not pred_tokens and not gold_tokens:
+        return 0.0
     if not pred_tokens or not gold_tokens:
-        return float(pred_tokens == gold_tokens)
+        return 0.0
     common = Counter(pred_tokens) & Counter(gold_tokens)
     n_common = sum(common.values())
     if n_common == 0:
@@ -156,9 +158,9 @@ def bench_boolq(model, limit=None):
         answer = model.reason(query).lower().strip()
 
         pred = None
-        if any(w in answer[:50] for w in ['yes', 'true', 'correct', 'right']):
+        if any(w in answer[:50] for w in ['yes', 'true', 'correct', 'right', 'affirmative']):
             pred = True
-        elif any(w in answer[:50] for w in ['no', 'false', 'incorrect', 'wrong', "don't", "not"]):
+        elif any(w in answer[:50] for w in ['no', 'false', 'incorrect', 'wrong', "don't", "not", 'negative']):
             pred = False
 
         if pred is not None and pred == gold:

@@ -26,6 +26,11 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 class VEF:
     """Language model from frozen statistics."""
 
+    # Pre-compiled regex for identity claim detection (used by _align_identity)
+    _identity_pattern = re.compile(
+        r'\b(I am|my name is|I was|trained by|created by|developed by|made by|built by)\b',
+        re.IGNORECASE)
+
     def __init__(self, data_dir=None, quiet=False):
         import time
         t0 = time.perf_counter()
@@ -116,11 +121,15 @@ class VEF:
         return self._format(answer or "", trace)
 
     def _compete(self, query, trace):
-        """All circuits produce candidates. Best confidence wins."""
+        """All circuits produce candidates. Best confidence wins.
+
+        Each circuit runs exactly once here; results are passed to _answer
+        so it doesn't re-run them.
+        """
         candidates = []
         q_emb = self.embeddings.embed(query, self.tokenizer)
 
-        # Every circuit gets a chance to answer
+        # Every circuit gets a chance to answer — run each once
         # Word problems
         wp = self.understanding.solve_word_problem(query)
         if wp:
@@ -131,39 +140,30 @@ class VEF:
         if logic:
             candidates.append((self._score(logic, q_emb), logic, "Logic"))
 
-        # Arithmetic / letter counting
+        # Arithmetic / letter counting — call once, reuse below
         computed = self._try_computation(query, trace)
         if computed:
             candidates.append((self._score(computed, q_emb), computed, "Computation"))
 
-        # Definitions
-        lower = query.lower().rstrip('?. ')
-        def_match = (
-            re.match(r"what(?:'s| is| are) (?:a |an |the )?(.+)", lower) or
-            re.match(r"(?:explain|describe|tell me about) (?:a |an |the )?(?:what )?(.+)", lower)
-        )
-        if def_match and self.definitions:
-            subject = def_match.group(1).strip()
-            if (not re.search(r'\d|[+\-*/]', subject)
-                and not re.search(r'\b(your|my|you|me)\b', subject)
-                and len(subject) >= 3):
-                if subject in self.definitions:
-                    d = self.definitions[subject]
-                    candidates.append((self._score(d, q_emb), d, "Definition"))
-                else:
-                    for word in subject.split():
-                        if len(word) >= 4 and word in self.definitions:
-                            d = self.definitions[word]
-                            candidates.append((self._score(d, q_emb), d, "Definition"))
-                            break
+        # Definitions — use extracted helper, call once
+        definition = self._lookup_definition(query)
+        if definition:
+            candidates.append((self._score(definition, q_emb), definition, "Definition"))
 
         # Composition (joke, poem, etc.)
         composed = self.composition.try_compose(query)
         if composed:
             candidates.append((self._score(composed, q_emb), composed, "Composition"))
 
-        # Retrieval (the general fallback)
-        retrieval_answer = self._answer(query, trace)
+        # Retrieval (the general fallback) — pass pre-computed results
+        # so _answer doesn't re-run logic, word problems, definitions, or computation
+        pre_computed = {
+            'logic': logic,
+            'word_problem': wp,
+            'definition': definition,
+            'computed': computed,
+        }
+        retrieval_answer = self._answer(query, trace, pre_computed=pre_computed)
         if retrieval_answer:
             candidates.append((self._score(retrieval_answer, q_emb),
                               retrieval_answer, "Retrieval"))
@@ -177,6 +177,32 @@ class VEF:
         trace.append(f"[{best_source}] Won with confidence {best_conf:.3f}")
         return best_answer
 
+    def _lookup_definition(self, query):
+        """Extract subject from a definition query and look up in definitions dict.
+
+        Returns the definition string if found, or None.
+        """
+        if not self.definitions:
+            return None
+        lower = query.lower().rstrip('?. ')
+        def_match = (
+            re.match(r"what(?:'s| is| are) (?:a |an |the )?(.+)", lower) or
+            re.match(r"(?:explain|describe|tell me about) (?:a |an |the )?(?:what )?(.+)", lower)
+        )
+        if not def_match:
+            return None
+        subject = def_match.group(1).strip()
+        if (re.search(r'\d|[+\-*/]', subject)
+            or re.search(r'\b(your|my|you|me)\b', subject)
+            or len(subject) < 3):
+            return None
+        if subject in self.definitions:
+            return self.definitions[subject]
+        for word in subject.split():
+            if len(word) >= 4 and word in self.definitions:
+                return self.definitions[word]
+        return None
+
     def _score(self, answer, q_emb):
         """Score a candidate answer by embedding alignment to the query."""
         if q_emb is None or not answer:
@@ -186,8 +212,13 @@ class VEF:
             return 0.0
         return float(np.dot(q_emb, a_emb))
 
-    def _answer(self, query, trace):
-        """Answer a single query through understanding + retrieval + introspection."""
+    def _answer(self, query, trace, pre_computed=None):
+        """Answer a single query through understanding + retrieval + introspection.
+
+        When called from _compete, pre_computed contains already-evaluated circuit
+        results to avoid duplicate work.
+        """
+        pre = pre_computed or {}
 
         # Detect format constraints from the query
         constraints = self.understanding.detect_constraints(query)
@@ -195,41 +226,26 @@ class VEF:
             trace.append(f"[Constraints] {constraints}")
 
         # Try logic/reasoning first (antonyms, sequences, syllogisms)
-        logic = self.understanding.answer_logic(query)
+        # Reuse pre-computed result if available
+        logic = pre.get('logic') if pre.get('logic') is not None else self.understanding.answer_logic(query)
         if logic:
             trace.append(f"[Logic] Answered from learned patterns")
             return self.understanding.apply_constraints(logic, constraints, query)
 
-        # Try word problem solving
-        word_problem = self.understanding.solve_word_problem(query)
+        # Try word problem solving — reuse if available
+        word_problem = pre.get('word_problem') if pre.get('word_problem') is not None else self.understanding.solve_word_problem(query)
         if word_problem:
             trace.append(f"[Word Problem] Parsed and computed")
             return word_problem
 
-        # CATEGORY BASIS: check definitions for knowledge queries.
-        # Matches: "what is X", "explain X", "define X", "describe X", "tell me about X"
-        lower = query.lower().rstrip('?. ')
-        def_match = (
-            re.match(r"what(?:'s| is| are) (?:a |an |the )?(.+)", lower) or
-            re.match(r"(?:explain|describe|tell me about) (?:a |an |the )?(?:what )?(.+)", lower)
-        )
-        if def_match and self.definitions:
-            subject = def_match.group(1).strip()
-            # Skip arithmetic, personal queries ("your name"), and very short subjects
-            if (not re.search(r'\d|[+\-*/]', subject)
-                and not re.search(r'\b(your|my|you|me)\b', subject)
-                and len(subject) >= 3):
-                if subject in self.definitions:
-                    trace.append(f"[Category] Found definition for '{subject}'")
-                    return self.definitions[subject]
-                for word in subject.split():
-                    if len(word) >= 4 and word in self.definitions:
-                        trace.append(f"[Category] Found definition for '{word}'")
-                        return self.definitions[word]
+        # CATEGORY BASIS: check definitions — reuse extracted helper
+        definition = pre.get('definition') if pre.get('definition') is not None else self._lookup_definition(query)
+        if definition:
+            trace.append(f"[Category] Found definition")
+            return definition
 
-        # Try computation BEFORE awareness — letter counting and arithmetic
-        # don't need the basis, they operate on characters/digits directly
-        computed = self._try_computation(query, trace)
+        # Try computation BEFORE awareness — reuse if available
+        computed = pre.get('computed') if pre.get('computed') is not None else self._try_computation(query, trace)
         if computed:
             return computed
 
@@ -286,7 +302,7 @@ class VEF:
         best_resp = self.circuits.multi_hop(query, trace)
         if not best_resp:
             trace.append("[Retrieval] No results")
-            return self._try_computation(query, trace)
+            return computed  # reuse already-computed result (may be None)
 
         # Also get the raw score for confidence measurement
         results = self.retrieval.search(query, top_k=5)
@@ -294,7 +310,7 @@ class VEF:
         trace.append(f"[Retrieval] Best: \"{best_resp[:60]}...\" (score={best_score:.3f})")
 
         # Check if it's a math/letter question BEFORE accepting retrieval
-        computed = self._try_computation(query, trace)
+        # Reuse the computation result from earlier
         if computed:
             return computed
 
@@ -471,18 +487,15 @@ class VEF:
         """
         if not self._system_prompt:
             return text
-        # Detect identity claims
-        identity_pattern = re.compile(
-            r'\b(I am|my name is|I was|trained by|created by|developed by|made by|built by)\b',
-            re.IGNORECASE)
-        if not identity_pattern.search(text):
+        # Detect identity claims using pre-compiled class-level pattern
+        if not self._identity_pattern.search(text):
             return text
         # Split into sentences, replace identity sentence with system prompt
         sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
         result = []
         replaced = False
         for sent in sentences:
-            if identity_pattern.search(sent) and not replaced:
+            if self._identity_pattern.search(sent) and not replaced:
                 result.append(self._system_prompt)
                 replaced = True
             else:
@@ -491,10 +504,21 @@ class VEF:
 
     @staticmethod
     def _clean(text):
+        # Remove only 3+ consecutive duplicate words; keep legitimate pairs
+        # like "that that" or "had had"
         words = text.split()
-        cleaned = [words[0]] if words else []
+        if not words:
+            return text
+        cleaned = [words[0]]
         for i in range(1, len(words)):
-            if words[i].lower() != words[i-1].lower():
+            # Count how many times this word has repeated consecutively
+            run_length = 1
+            j = i
+            while j >= 1 and words[j].lower() == words[j-1].lower():
+                run_length += 1
+                j -= 1
+            # Only skip if this would be the 3rd+ consecutive duplicate
+            if run_length < 3:
                 cleaned.append(words[i])
         text = ' '.join(cleaned)
         text = re.sub(r'\s+([.,;:!?])', r'\1', text)

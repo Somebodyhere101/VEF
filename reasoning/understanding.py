@@ -17,6 +17,18 @@ from collections import Counter, defaultdict
 
 class Understanding:
 
+    FUNCTION_WORDS = frozenset({
+        'the','a','an','is','are','was','were','be','been',
+        'has','have','had','do','does','did','will','would',
+        'can','could','may','might','shall','should','must',
+        'not','no','nor','but','or','and','if','then','than',
+        'too','also','very','just','only','even','still',
+        'there','here','with','from','for','about','into',
+        'over','under','after','before','between','through',
+        'others','one','ones','some','any','all','each','every',
+        'more','most','less','much','many','few','other',
+    })
+
     def __init__(self, corpus, embeddings, tokenizer, relations, retrieval=None):
         self.corpus = corpus
         self.embeddings = embeddings
@@ -40,15 +52,7 @@ class Understanding:
 
         # Antonym via co-substitution (no hardcoded dictionary)
         # Validate: antonym must be a content word, not a function word
-        FUNCTION_WORDS = {'the','a','an','is','are','was','were','be','been',
-                          'has','have','had','do','does','did','will','would',
-                          'can','could','may','might','shall','should','must',
-                          'not','no','nor','but','or','and','if','then','than',
-                          'too','also','very','just','only','even','still',
-                          'there','here','with','from','for','about','into',
-                          'over','under','after','before','between','through',
-                          'others','one','ones','some','any','all','each','every',
-                          'more','most','less','much','many','few','other'}
+        FUNCTION_WORDS = self.FUNCTION_WORDS
         opp_match = re.search(r'opposite\s+of\s+(\w+)', lower)
         if opp_match:
             word = opp_match.group(1)
@@ -106,7 +110,7 @@ class Understanding:
                 if len(set(diffs)) == 1:
                     return f"The pattern is +{diffs[0]}. Next: {nums[-1] + diffs[0]}."
                 ratios = [nums[i+1] / nums[i] for i in range(len(nums)-1) if nums[i] != 0]
-                if ratios and len(set([round(r, 2) for r in ratios])) == 1:
+                if ratios and (max(ratios) - min(ratios) < 0.01):
                     return f"The pattern is ×{ratios[0]:.0f}. Next: {int(nums[-1] * ratios[0])}."
 
         # Comparison from mined facts
@@ -288,7 +292,10 @@ class Understanding:
         if emb is None:
             return None
         scores = self.embeddings.normed @ emb
-        for tid in np.argsort(-scores)[:20]:
+        top_k = min(20, len(scores))
+        top_indices = np.argpartition(-scores, top_k)[:top_k]
+        top_indices = top_indices[np.argsort(-scores[top_indices])]
+        for tid in top_indices:
             candidate = self.tokenizer.decode([int(tid)]).strip().lower()
             if len(candidate) >= 3 and candidate.isalpha() and candidate != word:
                 return candidate.capitalize() + '.'
@@ -296,9 +303,16 @@ class Understanding:
 
     def _compare(self, a, b, adjective):
         """Compare using corpus-mined comparison facts first, embeddings as fallback."""
+        # Adjectives implying "less" — swap winner/loser when these are used
+        less_adjectives = {'smaller', 'shorter', 'fewer', 'lighter', 'slower',
+                           'weaker', 'thinner', 'narrower', 'lower', 'cheaper',
+                           'quieter', 'softer', 'colder', 'younger', 'less'}
+        invert = adjective.lower() in less_adjectives
         result = self.relations.find_comparison(a, b)
         if result:
             winner, loser = result
+            if invert:
+                winner, loser = loser, winner
             return f"{winner.capitalize()} is {adjective} than {loser}."
         # Fallback: embedding proximity to the adjective
         ea = self.embeddings.embed(a, self.tokenizer)

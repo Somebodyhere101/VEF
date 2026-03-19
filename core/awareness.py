@@ -69,11 +69,11 @@ class Awareness:
         # Thresholds calibrated from the observed separation between
         # real concepts (energy ~0.8-1.0, conc ~0.14-0.20) and
         # gibberish (energy ~0.55-0.69, conc ~0.26-0.35)
-        if energy > 0.75 and concentration < 0.23:
-            return 'meaning', energy, concentration, "strong basis projection, distributed energy"
-        elif energy > 0.95 and concentration < 0.30:
+        if energy > 0.95 and concentration < 0.30:
             # Very high energy = word IS in vocabulary, even if concentrated
             return 'partial', energy, concentration, "strong energy, slightly concentrated"
+        elif energy > 0.75 and concentration < 0.23:
+            return 'meaning', energy, concentration, "strong basis projection, distributed energy"
         elif energy < 0.72 or concentration > 0.30:
             return 'noise', energy, concentration, "weak basis / concentrated energy"
         else:
