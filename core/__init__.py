@@ -7,3 +7,4 @@ from .refinement import Refinement
 from .awareness import Awareness
 from .operators import FusedOperators
 from .fusion import DeepFusion
+from .decoder import WordDecoder

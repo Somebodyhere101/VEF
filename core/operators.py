@@ -28,10 +28,14 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class FusedOperators:
     """Computation through embedding-space transformations."""
 
-    def __init__(self, embeddings, tokenizer, data_dir=None):
+    def __init__(self, embeddings, tokenizer, data_dir=None, corpus=None):
         self.embeddings = embeddings
         self.tokenizer = tokenizer
         self.dim = embeddings.dim
+        # Corpus reference for corpus-based decoding
+        self._corpus_embeds = corpus.q_embeds if corpus else None
+        self._corpus_entries = corpus.entries if corpus else None
+        self._n_entries = corpus.n_entries if corpus else 0
         self._data_dir = data_dir
 
         # Operator matrices: each operator is a (dim, dim) transformation
@@ -399,7 +403,7 @@ class FusedOperators:
         return None
 
     def _try_negate(self, query, trace):
-        """Fused negation: opposite via embedding transformation."""
+        """Fused negation: opposite via embedding transformation + corpus verification."""
         match = re.search(r'opposite\s+of\s+(\w+)', query)
         if not match or 'negate' not in self.operators:
             return None
@@ -411,17 +415,51 @@ class FusedOperators:
 
         # Apply negation operator
         neg_op = self.operators['negate']
-        # Transform: move along negation axis
         projection = np.dot(emb, neg_op)
         result_emb = emb + neg_op * abs(projection) * 2.0
         result_emb = result_emb / (np.linalg.norm(result_emb) + 1e-10)
 
-        # Decode: find nearest word
-        decoded = self._decode_word(result_emb, exclude={word})
-        if decoded:
-            trace.append(f"[Fused] Negation: {word} → {decoded} "
-                         f"(projection={projection:.3f})")
-            return f"The opposite of {word} is {decoded}."
+        # Decode via CORPUS entries, not individual words
+        # Find corpus entries near the transformed embedding
+        r_t = torch.tensor(result_emb.astype(np.float32), device=DEVICE)
+        scores = self._corpus_embeds @ r_t
+        top_scores, top_idx = scores.topk(min(10, len(scores)))
+
+        # Extract candidate opposite words from corpus entries
+        import re as _re
+        candidates = {}
+        for idx in top_idx:
+            idx_val = idx.item()
+            if idx_val < self._n_entries:
+                entry = self._corpus_entries[idx_val]
+                # Look for "opposite" patterns or just content words
+                entry_words = set(_re.findall(r'[a-z]{3,}', entry.lower()))
+                for w in entry_words:
+                    if (w != word and w not in _COMMON_STOPS and
+                            len(w) >= 3 and not w.startswith(word[:3])):
+                        w_emb = self.embeddings.embed(w, self.tokenizer)
+                        if w_emb is not None:
+                            sim = float(np.dot(result_emb, w_emb /
+                                               (np.linalg.norm(w_emb) + 1e-10)))
+                            if w not in candidates or sim > candidates[w]:
+                                candidates[w] = sim
+
+        if candidates:
+            # Pick the best candidate that's dissimilar to the input word
+            scored = sorted(candidates.items(), key=lambda x: -x[1])
+            for candidate, sim in scored[:10]:
+                # Verify it's actually semantically distant from input
+                c_emb = self.embeddings.embed(candidate, self.tokenizer)
+                if c_emb is not None:
+                    input_sim = float(np.dot(
+                        emb / (np.linalg.norm(emb) + 1e-10),
+                        c_emb / (np.linalg.norm(c_emb) + 1e-10)))
+                    # Good opposite: close to transformed emb, far from original
+                    if input_sim < 0.7:
+                        trace.append(f"[Fused] Negation: {word} → {candidate} "
+                                     f"(proj={projection:.3f}, "
+                                     f"input_sim={input_sim:.3f})")
+                        return f"The opposite of {word} is {candidate}."
 
         return None
 
@@ -497,10 +535,50 @@ class FusedOperators:
         result_emb = emb + cat_op
         result_emb = result_emb / (np.linalg.norm(result_emb) + 1e-10)
 
-        decoded = self._decode_word(result_emb, exclude={instance})
-        if decoded:
-            trace.append(f"[Fused] Category: {instance} → {decoded}")
-            return f"{instance.capitalize()} is a type of {decoded}."
+        # Decode via corpus: find entries that describe what category this belongs to
+        if self._corpus_embeds is not None:
+            r_t = torch.tensor(result_emb.astype(np.float32), device=DEVICE)
+            scores = self._corpus_embeds @ r_t
+            top_scores, top_idx = scores.topk(min(20, len(scores)))
+
+            import re as _re
+            # Look for "is a [category]" patterns in corpus entries
+            for idx in top_idx:
+                idx_val = idx.item()
+                if idx_val < self._n_entries:
+                    entry = self._corpus_entries[idx_val].lower()
+                    # Pattern: "[instance] is a/an [category]"
+                    cat_match = _re.search(
+                        rf'{instance}\s+is\s+(?:a|an)\s+(\w+)', entry)
+                    if cat_match:
+                        category = cat_match.group(1)
+                        if (category != instance and len(category) >= 3 and
+                                category not in _COMMON_STOPS):
+                            trace.append(f"[Fused] Category: {instance} → {category} "
+                                         f"(corpus-verified)")
+                            return f"{instance.capitalize()} is a type of {category}."
+
+            # Fallback: extract the most relevant noun near the transformed embedding
+            candidates = {}
+            for idx in top_idx[:10]:
+                idx_val = idx.item()
+                if idx_val < self._n_entries:
+                    entry_words = set(_re.findall(r'[a-z]{4,}', 
+                                                  self._corpus_entries[idx_val].lower()))
+                    for w in entry_words:
+                        if (w != instance and w not in _COMMON_STOPS and
+                                not w.startswith(instance[:3])):
+                            w_emb = self.embeddings.embed(w, self.tokenizer)
+                            if w_emb is not None:
+                                sim = float(np.dot(result_emb, w_emb /
+                                                   (np.linalg.norm(w_emb) + 1e-10)))
+                                if w not in candidates or sim > candidates[w]:
+                                    candidates[w] = sim
+
+            if candidates:
+                best = max(candidates, key=candidates.get)
+                trace.append(f"[Fused] Category: {instance} → {best}")
+                return f"{instance.capitalize()} is a type of {best}."
 
         return None
 
@@ -525,11 +603,21 @@ class FusedOperators:
         return None
 
     def _decode_word(self, emb, exclude=None):
-        """Decode an embedding to the nearest known word."""
+        """Decode an embedding to the nearest known word.
+
+        Uses WordDecoder (whole words) if available, falls back to BPE tokens.
+        """
         if exclude is None:
             exclude = set()
 
-        # Use the normed embedding matrix for fast cosine similarity
+        full_exclude = exclude | _COMMON_STOPS
+
+        # Use whole-word decoder with morphological exclusion
+        if hasattr(self, 'decoder') and self.decoder is not None:
+            return self.decoder.decode_clean_best(emb, source_words=list(exclude),
+                                                   exclude=full_exclude)
+
+        # Fallback: BPE token decoding
         sims = self.embeddings.normed @ emb
         top_k = min(30, len(sims))
         top_indices = np.argpartition(-sims, top_k)[:top_k]
@@ -537,10 +625,9 @@ class FusedOperators:
 
         for idx in top_indices:
             decoded = self.tokenizer.decode([int(idx)]).strip().lower()
-            # Clean up BPE artifacts
             decoded = decoded.replace('Ġ', '').replace('Ã', '').strip()
             if (len(decoded) >= 2 and decoded.isalpha() and
-                    decoded not in exclude and decoded not in _COMMON_STOPS):
+                    decoded not in full_exclude):
                 return decoded
 
         return None

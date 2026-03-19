@@ -463,10 +463,21 @@ class DeepFusion:
         return resp
 
     def _decode_concept(self, emb, exclude=None, top_k=8):
-        """Decode an embedding to a list of nearby concept words."""
+        """Decode an embedding to a list of nearby concept words.
+
+        Uses WordDecoder (whole words) if available, falls back to BPE tokens.
+        """
         if exclude is None:
             exclude = set()
 
+        full_exclude = exclude | _QUERY_WORDS | _COMMON_STOPS
+
+        # Use whole-word decoder with morphological exclusion
+        if hasattr(self, 'decoder') and self.decoder is not None:
+            return self.decoder.decode_words(emb, top_k=top_k, exclude=full_exclude,
+                                              exclude_morphological=exclude)
+
+        # Fallback: BPE token decoding
         sims = self.embeddings.normed @ emb
         n = min(50, len(sims))
         top_indices = np.argpartition(-sims, n)[:n]
@@ -477,9 +488,7 @@ class DeepFusion:
             decoded = self.tokenizer.decode([int(idx)]).strip().lower()
             decoded = decoded.replace('Ġ', '').replace('Ã', '').strip()
             if (len(decoded) >= 3 and decoded.isalpha() and
-                    decoded not in exclude and
-                    decoded not in _QUERY_WORDS and
-                    decoded not in _COMMON_STOPS):
+                    decoded not in full_exclude):
                 results.append(decoded)
                 if len(results) >= top_k:
                     break

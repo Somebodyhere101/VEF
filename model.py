@@ -17,10 +17,11 @@ import numpy as np
 
 from tokenizers import Tokenizer
 
-from core import Embeddings, Corpus, Attention, Relations, Refinement, Awareness, FusedOperators, DeepFusion
+from core import Embeddings, Corpus, Attention, Relations, Refinement, Awareness, FusedOperators, DeepFusion, WordDecoder
 from core.config import DEFAULT as CFG
 from reasoning import Retrieval, Introspection, Arithmetic, Composition, Decomposition, Understanding, Circuits
 from reasoning.boundary import BoundaryComposer, ComputationDelegate
+from reasoning.instructions import InstructionFollower
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 
@@ -81,8 +82,14 @@ class VEF:
             self.circuits = Circuits(self.embeddings, self.corpus, self.tokenizer, self.retrieval)
             self.boundary = BoundaryComposer(self.embeddings, self.corpus, self.tokenizer, self.awareness, self.retrieval)
             self.compute = ComputationDelegate()
-            self.fused = FusedOperators(self.embeddings, self.tokenizer, data_dir=data)
+            self.decoder = WordDecoder(self.embeddings, self.corpus, self.tokenizer, data_dir=data)
+            self.fused = FusedOperators(self.embeddings, self.tokenizer, data_dir=data, corpus=self.corpus)
+            self.fused.decoder = self.decoder  # Inject decoder
             self.deep_fusion = DeepFusion(self.embeddings, self.corpus, self.tokenizer, self.fused, self.awareness)
+            self.deep_fusion.decoder = self.decoder  # Inject decoder
+            self.instructor = InstructionFollower(
+                self.embeddings, self.corpus, self.tokenizer, self.awareness,
+                self.retrieval, self.deep_fusion, self.fused, self.decoder)
 
         self._system_prompt = None
         self._show_reasoning = False
@@ -138,8 +145,13 @@ class VEF:
 
         # Every circuit gets a chance to answer — run each once
 
+        # Instruction following — parse and execute structured instructions
+        instr_result, instr_used = self.instructor.follow(query, trace)
+        if instr_used and instr_result:
+            candidates.append((self._score(instr_result, q_emb) + 1.6,
+                               instr_result, "Instruction"))
+
         # Deep fusion — multi-step reasoning inside the basis
-        # Intersection, analogy, conditional, operator chaining
         deep_result, deep_used = self.deep_fusion.reason(query, trace)
         if deep_used and deep_result:
             candidates.append((self._score(deep_result, q_emb) + 1.8,
