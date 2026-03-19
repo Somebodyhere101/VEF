@@ -2,9 +2,9 @@
 
 # VEF — Language Model from Frozen Statistics
 
-A fully interpretable language model that competes with billion-parameter transformers on public benchmarks — with **zero gradient descent**.
+A fully interpretable language model built entirely from frozen statistics — **no gradient descent, no backpropagation, no training loop**.
 
-Built entirely from closed-form statistical operations on a text corpus: PPMI + SVD for embeddings, adaptive multi-signal retrieval, iterative refinement, co-substitution for relationship discovery, and basis/anti-basis awareness for hallucination detection. Every answer traces to a specific corpus entry. Every decision is interpretable. Trained in 35 minutes on a single GPU.
+Uses closed-form statistical operations on a text corpus: PPMI + SVD for embeddings, adaptive multi-signal retrieval, iterative refinement, co-substitution for relationship discovery, and basis/anti-basis awareness for hallucination detection. Every answer traces to a specific corpus entry. Every decision is interpretable. Built in 35 minutes on a single GPU.
 
 ## Out-of-Distribution Demo
 
@@ -53,13 +53,15 @@ VEF: 156 + 287 = 443
 
 Evaluated on standard public benchmarks. Zero-shot, no task-specific tuning.
 
-| Benchmark | VEF | Pythia-1B | Random | |
-|---|---|---|---|---|
-| **ARC-Easy** | **38.9%** | 29.1% | 25% | **VEF wins (+9.8%)** |
-| **MMLU** | **27.6%** | 24.3% | 25% | **VEF wins (+3.3%)** |
-| TruthfulQA | 32.4% | 38.9%* | ~20% | Pythia wins |
+**Important note on methodology:** VEF evaluates multiple-choice benchmarks via embedding similarity (choosing the answer whose embedding best aligns with the query). This is a different evaluation protocol than generative models like Pythia, which predict the next token. Scores are not directly comparable across methods — they show that frozen SVD embeddings capture enough structure to perform above random on standard benchmarks.
 
-\* *Pythia TruthfulQA score is overall metric; VEF uses MC1 format. Scores may not be directly comparable.*
+| Benchmark | VEF (embedding similarity) | Pythia-1B (generative) | Random |
+|---|---|---|---|
+| ARC-Easy | 38.9% | 29.1% | 25% |
+| MMLU | 27.6% | 24.3% | 25% |
+| TruthfulQA (MC1) | 32.4% | 38.9%* | ~20% |
+
+\* *Pythia TruthfulQA score is overall metric; VEF uses MC1 format. Different evaluation protocols — not an apples-to-apples comparison.*
 
 ![Benchmark Comparison](benchmark_chart.png)
 
@@ -166,7 +168,7 @@ All circuits compete in parallel — no hardcoded priority chain. Each circuit t
 | | Transformer | VEF |
 |---|---|---|
 | **Training** | Gradient descent (300+ GPU-hours) | Closed-form statistics (35 min, 1 GPU) |
-| **Parameters** | 1 billion+ opaque weights | Zero learned parameters — corpus entries only |
+| **Parameters** | 1 billion+ opaque weights | No gradient-trained parameters — corpus entries + SVD statistics |
 | **Interpretability** | Attention maps (approximate) | Every answer traces to a specific corpus entry |
 | **Confidence** | Requires calibration dataset | Basis vs anti-basis geometry (built-in) |
 | **"Strawberry" test** | GPT-4 failed this for months | Passes by design (spells and counts) |
@@ -312,14 +314,13 @@ The mathematical framework has no ceiling — W* = (H'H + λI)⁻¹H'Y gives opt
 | Multi-step reasoning | Cannot chain intermediate results across steps | Context carry between decomposed sub-queries |
 | Hallucination on malformed input | Awareness circuit bypassed when no concepts extracted | Stronger input validation via basis energy |
 
-**What is NOT limited:**
-- The closed-form equation scales to any data size
-- The basis can be extended to any domain (spatial, temporal, logical)
-- The anti-basis awareness generalizes to any vocabulary
+**What scales well:**
+- The closed-form pipeline scales linearly with data size (not exponentially like gradient descent)
+- The basis can be extended to new domains by adding data
+- The anti-basis awareness generalizes to any vocabulary without retuning
 - The architecture is fully interpretable at every step
-- Training time scales linearly, not exponentially
 
-The theory predicts: with the correct basis, this system achieves the same generalization as any gradient-descent model — instantly. The gap between current performance and theoretical ceiling is entirely a question of finding better bases.
+The theory suggests: with a sufficiently expressive basis, closed-form solutions can approach the generalization of gradient-descent models. Finding the right basis remains an open research question — but the gap between current performance and theoretical ceiling is narrowed by better basis extraction, not more training compute.
 
 ## Citation
 
@@ -327,10 +328,11 @@ Based on the theoretical framework:
 
 > *The Mechanistic Physics of Generalization: Basis Selection Through Natural Competition*
 >
-> Generalization is not a mystery — it is a deterministic consequence of
-> basis selection. Given the correct basis H, the optimal weights are:
-> W* = (H'H + λI)⁻¹H'Y. This holds for any domain where the right
-> features can be identified from data statistics.
+> Generalization in neural networks correlates with low-rank structure in
+> weight matrices. Given a sufficient basis H extracted from data statistics,
+> the optimal linear mapping W* = (H'H + λI)⁻¹H'Y can be computed in
+> closed form. VEF demonstrates this principle: PPMI+SVD embeddings serve
+> as the basis, and retrieval over the corpus replaces iterative optimization.
 
 ## License
 

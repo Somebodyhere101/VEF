@@ -14,20 +14,25 @@ Plus:
   - Quality filtering (prefer well-formed responses)
   - System prompt injection (model can describe itself)
 """
+import os
 import re
 import numpy as np
 import torch
+
+from core.config import DEFAULT as CFG
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class Retrieval:
 
-    def __init__(self, embeddings, corpus, tokenizer, attention=None):
+    def __init__(self, embeddings, corpus, tokenizer, attention=None, data_dir=None):
         self.embeddings = embeddings
         self.corpus = corpus
         self.tokenizer = tokenizer
         self.attention = attention
+        self._data_dir = data_dir or os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), 'data')
         self._system_emb = None
         self._system_entries = []
         self._resp_embeds = None
@@ -36,8 +41,7 @@ class Retrieval:
 
     def _load_conv_mask(self):
         """Load conversation mask for quality filtering."""
-        import os
-        path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'conv_mask.npy')
+        path = os.path.join(self._data_dir, 'conv_mask.npy')
         if os.path.exists(path):
             self._conv_mask = np.load(path)
             self._conv_indices = torch.tensor(
@@ -45,8 +49,7 @@ class Retrieval:
 
     def _load_resp_embeds(self):
         """Lazy-load response embeddings."""
-        import os
-        path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'resp_embeds_idf.npy')
+        path = os.path.join(self._data_dir, 'resp_embeds_idf.npy')
         if os.path.exists(path):
             r = np.load(path)
             self._resp_embeds = torch.tensor(r.astype(np.float32), device=DEVICE)
@@ -91,10 +94,9 @@ class Retrieval:
         content_words = self.corpus.content_words(query)
         n_words = len(query.split())
 
-        # For short queries (1-3 words): search ONLY conversational entries.
-        # This prevents code/wiki fragments from drowning out natural responses.
-        # Like the brain filtering modality — "Hello" activates social circuits, not code.
-        use_conv_only = (n_words <= 3 and self._conv_mask is not None
+        # For short queries: search ONLY conversational entries to prevent
+        # code/wiki fragments from drowning out natural responses.
+        use_conv_only = (n_words <= CFG.SHORT_QUERY_WORDS and self._conv_mask is not None
                          and not any(c.isdigit() for c in query))
 
         # === Signal 1: Q-Q cosine (question-question similarity) ===
@@ -160,9 +162,9 @@ class Retrieval:
         confidence = max(0, min(1, (max_qq - 0.6) / 0.3))
         confidence *= min(1.0, n_words / 4.0)
 
-        w_qq = 0.10 + 0.70 * confidence
-        w_rb = 0.85 - 0.60 * confidence
-        w_rs = 0.05 - 0.10 * confidence
+        w_qq = CFG.RETRIEVAL_QQ_BASE + CFG.RETRIEVAL_QQ_CONF_SCALE * confidence
+        w_rb = CFG.RETRIEVAL_RB_BASE - CFG.RETRIEVAL_RB_CONF_SCALE * confidence
+        w_rs = CFG.RETRIEVAL_RS_BASE - CFG.RETRIEVAL_RS_CONF_SCALE * confidence
         w_rs = max(0.0, w_rs)
         w_total = w_qq + w_rb + w_rs
         w_qq, w_rb, w_rs = w_qq / w_total, w_rb / w_total, w_rs / w_total
@@ -180,12 +182,11 @@ class Retrieval:
         results = []
 
         # System prompt injection — only when query is genuinely about identity.
-        # Must score ABOVE 0.85 similarity to a trigger question AND
-        # the corpus's best result must not already be a good answer.
         if self._system_entries:
             best_sim = max(float(np.dot(q_emb, emb)) for emb, _ in self._system_entries)
             corpus_best = float(top_qq[0]) if len(top_qq) > 0 else 0
-            if best_sim > 0.9 or (best_sim > 0.8 and corpus_best < best_sim * 0.5):
+            if (best_sim > CFG.SYSTEM_INJECT_HIGH or
+                    (best_sim > CFG.SYSTEM_INJECT_LOW and corpus_best < best_sim * 0.5)):
                 results.append((best_sim * 1.5, self._system_entries[0][1]))
 
         for score, idx in zip(final.tolist(), top_idx.tolist()):
@@ -225,14 +226,14 @@ class Retrieval:
                     if w in resp_lower) >= 2))
             quality = min(len(resp) / 200.0, 1.0)
             if is_code:
-                quality *= 0.15
+                quality *= CFG.RETRIEVAL_CODE_PENALTY
             elif is_code_discussion:
-                quality *= 0.2
+                quality *= CFG.RETRIEVAL_CODE_DISCUSSION_PENALTY
             score = score * (0.6 + 0.4 * quality)
 
             # Length matching: short queries → prefer concise responses
-            if n_words <= 3 and len(resp) > 400:
-                score *= 0.6
+            if n_words <= CFG.SHORT_QUERY_WORDS and len(resp) > 400:
+                score *= CFG.RETRIEVAL_LONG_RESPONSE_PENALTY
 
             results.append((score, resp))
 
@@ -245,9 +246,9 @@ class Retrieval:
             for score, resp in results:
                 z = (score - mean_s) / std_s
                 if z > 0:
-                    adj = score * (1.0 + 0.15 * z)
+                    adj = score * (1.0 + CFG.LATERAL_AMPLIFY * z)
                 else:
-                    adj = score * max(0.4, 1.0 + 0.2 * z)
+                    adj = score * max(CFG.LATERAL_FLOOR, 1.0 + CFG.LATERAL_SUPPRESS * z)
                 inhibited.append((adj, resp))
             results = inhibited
 

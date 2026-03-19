@@ -1,12 +1,13 @@
 """
-Structural composition — the human way of creating novel content.
+Structural composition — form × content retrieval.
 
 Separates FORM (joke, poem, definition) from CONTENT (cats, ocean, gravity).
-Finds corpus entries at the intersection of both. When no direct hit exists,
-adapts a form-matching entry by replacing its content words with the target
-concept's properties.
+Finds corpus entries at the intersection of both — the entry that best
+matches both the requested form and the target content.
 
-This generates text that never existed in the corpus.
+Currently retrieval-only: returns existing corpus entries that match
+form+content. Future work: adapt form-matching entries by substituting
+content words to generate truly novel text.
 """
 import re
 import numpy as np

@@ -1,3 +1,4 @@
+from .config import Config, DEFAULT as DefaultConfig
 from .embeddings import Embeddings
 from .corpus import Corpus
 from .attention import Attention

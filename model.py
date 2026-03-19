@@ -18,6 +18,7 @@ import numpy as np
 from tokenizers import Tokenizer
 
 from core import Embeddings, Corpus, Attention, Relations, Refinement, Awareness
+from core.config import DEFAULT as CFG
 from reasoning import Retrieval, Introspection, Arithmetic, Composition, Decomposition, Understanding, Circuits
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
@@ -59,6 +60,7 @@ class VEF:
                                         cache_dir=data)
             self.relations._corpus_entries = self.corpus.entries
             self.relations.learn_antonym_axis(self.embeddings, self.tokenizer)
+            self.relations._corpus_entries = None  # release large corpus ref
             self.awareness = Awareness(self.embeddings, self.tokenizer)
             self.refinement = Refinement(self.embeddings, self.corpus, self.tokenizer)
 
@@ -69,7 +71,7 @@ class VEF:
             else:
                 self.definitions = {}
 
-            self.retrieval = Retrieval(self.embeddings, self.corpus, self.tokenizer, self.attention)
+            self.retrieval = Retrieval(self.embeddings, self.corpus, self.tokenizer, self.attention, data_dir=data)
             self.introspection = Introspection(self.embeddings, self.corpus, self.tokenizer)
             self.arithmetic = Arithmetic(self.corpus.entries, cache_dir=data)
             self.composition = Composition(self.embeddings, self.corpus, self.tokenizer)
@@ -336,7 +338,7 @@ class VEF:
 
         trace.append(f"[Introspection] {details}, confidence={confidence:.3f}")
 
-        if confidence > 0.3:
+        if confidence > CFG.CONFIDENCE_ACCEPT:
             return self._clean(best_resp[:500])
 
         # Low confidence — try category lookup
@@ -479,28 +481,24 @@ class VEF:
         return answer
 
     def _align_identity(self, text):
-        """Replace identity claims in retrieved text with the system prompt.
+        """Replace first-person identity claims in retrieved text with the system prompt.
 
-        If the response says 'I am trained by LAION' but the system prompt
-        says 'My name is VEF', replace the conflicting identity sentence.
-        This is the self-edit circuit — not hardcoded, driven by the system prompt.
+        Only triggers on direct self-identification ("I am X", "my name is X",
+        "trained by X") — not general uses of "I am" in other contexts.
         """
         if not self._system_prompt:
             return text
-        # Detect identity claims using pre-compiled class-level pattern
         if not self._identity_pattern.search(text):
             return text
-        # Split into sentences, replace identity sentence with system prompt
+        # Only replace if the identity claim is in the first sentence
+        # (where retrieved responses typically state identity)
         sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
-        result = []
-        replaced = False
-        for sent in sentences:
-            if self._identity_pattern.search(sent) and not replaced:
-                result.append(self._system_prompt)
-                replaced = True
-            else:
-                result.append(sent)
-        return ' '.join(result) if replaced else text
+        if not sentences:
+            return text
+        if self._identity_pattern.search(sentences[0]):
+            sentences[0] = self._system_prompt
+            return ' '.join(sentences)
+        return text
 
     @staticmethod
     def _clean(text):

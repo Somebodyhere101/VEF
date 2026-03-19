@@ -1,5 +1,5 @@
 """
-Awareness — the war between basis and anti-basis.
+Awareness — basis vs anti-basis knowledge detection.
 
 The basis (128 SVD dimensions) captures what the model KNOWS.
 The anti-basis (null space) captures what it DOESN'T.
@@ -9,13 +9,11 @@ For any input:
   - Low basis energy, high concentration → NOISE (model has no information)
   - Medium energy, medium concentration → PARTIAL (model has some knowledge)
 
-This is not a threshold. It's the GEOMETRY of the learned space
-telling the model where its knowledge ends.
-
-The basis and anti-basis are two sides of the same coin:
-one enables generalization, the other detects its limits.
+The geometry of the learned space tells the model where its knowledge ends.
 """
 import numpy as np
+
+from core.config import DEFAULT as CFG
 
 
 class Awareness:
@@ -38,7 +36,6 @@ class Awareness:
         if not ids:
             return 'noise', 0.0, 1.0, "empty input"
 
-        # Token embeddings in the basis (128d SVD space)
         E = self.embeddings.raw
         idf = self.embeddings.idf
 
@@ -48,16 +45,14 @@ class Awareness:
         if total_w < 1e-10:
             return 'noise', 0.0, 1.0, "no IDF weight"
 
-        # Weighted average embedding in basis space
         w = weights / total_w
         emb = (token_embs * w[:, None]).sum(0)
 
         # BASIS ENERGY: norm of projection onto learned space
         energy = float(np.linalg.norm(emb))
 
-        # ANTI-BASIS SIGNAL: how concentrated is the energy?
-        # Real concepts spread across many dimensions (rich connections)
-        # Noise concentrates in few random dimensions (no structure)
+        # ANTI-BASIS SIGNAL: entropy of energy distribution across dimensions
+        # Real concepts spread across many dimensions; noise concentrates in few
         concentration = 0.0
         if energy > 0:
             normalized = (emb / energy) ** 2
@@ -65,16 +60,14 @@ class Awareness:
             max_entropy = np.log(len(emb))
             concentration = 1.0 - entropy / max_entropy
 
-        # Classify by the war between basis and anti-basis
-        # Thresholds calibrated from the observed separation between
+        # Classification thresholds calibrated from observed separation between
         # real concepts (energy ~0.8-1.0, conc ~0.14-0.20) and
         # gibberish (energy ~0.55-0.69, conc ~0.26-0.35)
-        if energy > 0.95 and concentration < 0.30:
-            # Very high energy = word IS in vocabulary, even if concentrated
+        if energy > CFG.AWARENESS_STRONG_ENERGY and concentration < CFG.AWARENESS_STRONG_CONC:
             return 'partial', energy, concentration, "strong energy, slightly concentrated"
-        elif energy > 0.75 and concentration < 0.23:
+        elif energy > CFG.AWARENESS_MEANING_ENERGY and concentration < CFG.AWARENESS_MEANING_CONC:
             return 'meaning', energy, concentration, "strong basis projection, distributed energy"
-        elif energy < 0.72 or concentration > 0.30:
+        elif energy < CFG.AWARENESS_NOISE_ENERGY or concentration > CFG.AWARENESS_NOISE_CONC:
             return 'noise', energy, concentration, "weak basis / concentrated energy"
         else:
             return 'partial', energy, concentration, "borderline signal"

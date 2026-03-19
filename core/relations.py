@@ -60,7 +60,7 @@ class Relations:
         self.ordered_pairs = defaultdict(Counter)
         self.categories = defaultdict(list)
 
-        self._corpus_entries = corpus_entries  # keep ref for full-corpus mining
+        self._corpus_entries = corpus_entries  # temporary ref for antonym axis learning
         self._scan(corpus_entries, max_entries)
 
         self.antonyms = {}

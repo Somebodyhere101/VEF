@@ -13,6 +13,8 @@ Convergence indicates the model has focused on a stable interpretation.
 import numpy as np
 import torch
 
+from core.config import DEFAULT as CFG
+
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -48,7 +50,7 @@ class Refinement:
             if prev_emb is not None:
                 similarity = float(np.dot(emb, prev_emb))
                 trace.append(f"Step {step}: similarity = {similarity:.4f}")
-                if similarity > 0.95:
+                if similarity > CFG.REFINEMENT_CONVERGENCE:
                     trace.append(f"Converged at step {step}")
                     break
             prev_emb = emb.copy()
