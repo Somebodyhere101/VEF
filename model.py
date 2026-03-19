@@ -17,7 +17,7 @@ import numpy as np
 
 from tokenizers import Tokenizer
 
-from core import Embeddings, Corpus, Attention, Relations, Refinement, Awareness
+from core import Embeddings, Corpus, Attention, Relations, Refinement, Awareness, FusedOperators
 from core.config import DEFAULT as CFG
 from reasoning import Retrieval, Introspection, Arithmetic, Composition, Decomposition, Understanding, Circuits
 from reasoning.boundary import BoundaryComposer, ComputationDelegate
@@ -81,6 +81,7 @@ class VEF:
             self.circuits = Circuits(self.embeddings, self.corpus, self.tokenizer, self.retrieval)
             self.boundary = BoundaryComposer(self.embeddings, self.corpus, self.tokenizer, self.awareness, self.retrieval)
             self.compute = ComputationDelegate()
+            self.fused = FusedOperators(self.embeddings, self.tokenizer, data_dir=data)
 
         self._system_prompt = None
         self._show_reasoning = False
@@ -136,7 +137,14 @@ class VEF:
 
         # Every circuit gets a chance to answer — run each once
 
-        # Computation delegation — deterministic Python execution
+        # Fused computation — operators living inside the embedding space
+        # The basis itself computes the answer, no external executor
+        fused_result, fused_used = self.fused.compute(query, trace)
+        if fused_used and fused_result:
+            candidates.append((self._score(fused_result, q_emb) + 1.5,
+                               fused_result, "Fused Operator"))
+
+        # Computation delegation — deterministic Python execution (fallback)
         # Gets a large bonus because computed answers are PROVABLY correct
         computed_delegate, delegate_used = self.compute.try_compute(query, trace)
         if delegate_used and computed_delegate:

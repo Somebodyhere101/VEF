@@ -5,3 +5,4 @@ from .attention import Attention
 from .relations import Relations
 from .refinement import Refinement
 from .awareness import Awareness
+from .operators import FusedOperators
