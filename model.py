@@ -17,7 +17,7 @@ import numpy as np
 
 from tokenizers import Tokenizer
 
-from core import Embeddings, Corpus, Attention, Relations, Refinement, Awareness, FusedOperators
+from core import Embeddings, Corpus, Attention, Relations, Refinement, Awareness, FusedOperators, DeepFusion
 from core.config import DEFAULT as CFG
 from reasoning import Retrieval, Introspection, Arithmetic, Composition, Decomposition, Understanding, Circuits
 from reasoning.boundary import BoundaryComposer, ComputationDelegate
@@ -82,6 +82,7 @@ class VEF:
             self.boundary = BoundaryComposer(self.embeddings, self.corpus, self.tokenizer, self.awareness, self.retrieval)
             self.compute = ComputationDelegate()
             self.fused = FusedOperators(self.embeddings, self.tokenizer, data_dir=data)
+            self.deep_fusion = DeepFusion(self.embeddings, self.corpus, self.tokenizer, self.fused, self.awareness)
 
         self._system_prompt = None
         self._show_reasoning = False
@@ -137,8 +138,14 @@ class VEF:
 
         # Every circuit gets a chance to answer — run each once
 
-        # Fused computation — operators living inside the embedding space
-        # The basis itself computes the answer, no external executor
+        # Deep fusion — multi-step reasoning inside the basis
+        # Intersection, analogy, conditional, operator chaining
+        deep_result, deep_used = self.deep_fusion.reason(query, trace)
+        if deep_used and deep_result:
+            candidates.append((self._score(deep_result, q_emb) + 1.8,
+                               deep_result, "Deep Fusion"))
+
+        # Fused computation — single-step operators inside the embedding space
         fused_result, fused_used = self.fused.compute(query, trace)
         if fused_used and fused_result:
             candidates.append((self._score(fused_result, q_emb) + 1.5,

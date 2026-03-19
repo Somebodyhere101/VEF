@@ -6,3 +6,4 @@ from .relations import Relations
 from .refinement import Refinement
 from .awareness import Awareness
 from .operators import FusedOperators
+from .fusion import DeepFusion
