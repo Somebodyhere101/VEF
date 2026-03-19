@@ -83,7 +83,7 @@ class VEF:
             self.boundary = BoundaryComposer(self.embeddings, self.corpus, self.tokenizer, self.awareness, self.retrieval)
             self.compute = ComputationDelegate()
             self.decoder = WordDecoder(self.embeddings, self.corpus, self.tokenizer, data_dir=data)
-            self.fused = FusedOperators(self.embeddings, self.tokenizer, data_dir=data, corpus=self.corpus)
+            self.fused = FusedOperators(self.embeddings, self.tokenizer, data_dir=data, corpus=self.corpus, relations=self.relations)
             self.fused.decoder = self.decoder  # Inject decoder
             self.deep_fusion = DeepFusion(self.embeddings, self.corpus, self.tokenizer, self.fused, self.awareness)
             self.deep_fusion.decoder = self.decoder  # Inject decoder
@@ -148,7 +148,7 @@ class VEF:
         # Instruction following — parse and execute structured instructions
         instr_result, instr_used = self.instructor.follow(query, trace)
         if instr_used and instr_result:
-            candidates.append((self._score(instr_result, q_emb) + 1.6,
+            candidates.append((self._score(instr_result, q_emb) + 1.9,
                                instr_result, "Instruction"))
 
         # Deep fusion — multi-step reasoning inside the basis

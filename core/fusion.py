@@ -243,18 +243,18 @@ class DeepFusion:
         return None
 
     def _try_analogy(self, query, trace):
-        """Analogy completion via parallelogram rule.
+        """Analogy completion via parallelogram rule + corpus verification.
 
         "X is to Y as Z is to ?"
         → embed(Y) - embed(X) + embed(Z) = embed(?)
 
-        The classic Word2Vec operation, but used for reasoning.
+        The parallelogram gives us the target region. Corpus entries
+        near that region provide the verified answer.
         """
         match = re.search(
             r'(\w+)\s+is\s+to\s+(\w+)\s+as\s+(\w+)\s+is\s+to\s+(?:what|\?)',
             query.lower())
         if not match:
-            # Also try: "if X is Y, then Z is ?"
             match = re.search(
                 r'if\s+(\w+)\s+is\s+(\w+)\s*,?\s+(?:then\s+)?(\w+)\s+is\s+(?:what|\?)',
                 query.lower())
@@ -262,6 +262,21 @@ class DeepFusion:
             return None
 
         a, b, c = match.group(1), match.group(2), match.group(3)
+
+        # Short-circuit: if A→B is a known relationship, apply same relationship to C
+        if hasattr(self, 'decoder') and self.decoder is not None:
+            # Check if A→B is a known antonym pair
+            ops = self.operators  # FusedOperators instance
+            if hasattr(ops, 'relations') and ops.relations:
+                rel = ops.relations
+                if (hasattr(rel, 'antonyms') and
+                        (rel.antonyms.get(a) == b or rel.antonyms.get(b) == a)):
+                    # A:B are antonyms → find antonym of C
+                    c_ant = rel.antonyms.get(c)
+                    if c_ant and c_ant not in {a, b, c}:
+                        trace.append(f"[DeepFusion] Analogy: {a}:{b} :: {c}:{c_ant} "
+                                     f"(antonym relation transfer)")
+                        return f"{a.capitalize()} is to {b} as {c} is to {c_ant}."
 
         ea = self.embeddings.embed(a, self.tokenizer)
         eb = self.embeddings.embed(b, self.tokenizer)
@@ -274,12 +289,57 @@ class DeepFusion:
         result_emb = eb - ea + ec
         result_emb = result_emb / (np.linalg.norm(result_emb) + 1e-10)
 
-        # Decode
+        # Decode via corpus entries near the parallelogram target
+        r_t = torch.tensor(result_emb.astype(np.float32), device=DEVICE)
+        scores = self.corpus.q_embeds @ r_t
+        top_scores, top_idx = scores.topk(min(30, len(scores)))
+
+        # Extract candidate words from corpus entries
+        import re as _re
+        candidates = {}
+        exclude = {a, b, c} | _QUERY_WORDS | _COMMON_STOPS
+        for idx in top_idx:
+            idx_val = idx.item()
+            if idx_val >= len(self.corpus.entries):
+                continue
+            entry = self.corpus.entries[idx_val].lower()
+            words = set(_re.findall(r'[a-z]{3,}', entry))
+            for w in words:
+                if w in exclude:
+                    continue
+                # Skip morphological relatives of input words
+                if any(w.startswith(x[:3]) or x.startswith(w[:3])
+                       for x in [a, b, c] if len(x) >= 3):
+                    continue
+                w_emb = self.embeddings.embed(w, self.tokenizer)
+                if w_emb is not None:
+                    sim = float(np.dot(result_emb, w_emb /
+                                       (np.linalg.norm(w_emb) + 1e-10)))
+                    # Verify: the relationship A→B should mirror C→candidate
+                    # Check that embed(candidate) - embed(C) ≈ embed(B) - embed(A)
+                    relation_vec = eb - ea
+                    candidate_vec = w_emb - ec
+                    rel_sim = float(np.dot(
+                        relation_vec / (np.linalg.norm(relation_vec) + 1e-10),
+                        candidate_vec / (np.linalg.norm(candidate_vec) + 1e-10)))
+                    # Combined score: proximity to parallelogram target + relation consistency
+                    combined = sim * 0.5 + rel_sim * 0.5
+                    if w not in candidates or combined > candidates[w]:
+                        candidates[w] = combined
+
+        if candidates:
+            best = sorted(candidates.items(), key=lambda x: -x[1])
+            answer = best[0][0]
+            trace.append(f"[DeepFusion] Analogy: {a}:{b} :: {c}:{answer} "
+                         f"(parallelogram + corpus, score={best[0][1]:.3f})")
+            return f"{a.capitalize()} is to {b} as {c} is to {answer}."
+
+        # Fallback: pure embedding decode
         decoded = self._decode_concept(result_emb, exclude={a, b, c})
         if decoded:
             answer = decoded[0]
             trace.append(f"[DeepFusion] Analogy: {a}:{b} :: {c}:{answer} "
-                         f"(parallelogram)")
+                         f"(parallelogram, unverified)")
             return f"{a.capitalize()} is to {b} as {c} is to {answer}."
 
         return None

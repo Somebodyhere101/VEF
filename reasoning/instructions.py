@@ -108,6 +108,13 @@ class InstructionFollower:
         if result is None:
             return None, False
 
+        # Step 3.5: Reject code responses for non-code queries
+        if result and self._is_code_response(result):
+            if not any(w in query.lower() for w in ['code', 'program', 'function',
+                                                      'implement', 'algorithm']):
+                trace.append(f"[Instruction] Rejected code response")
+                return None, False
+
         # Step 4: Apply constraints
         result = self._apply_constraints(result, constraints, trace)
 
@@ -272,14 +279,18 @@ class InstructionFollower:
         b_unique = self._decode(eb - diff_n * 0.3, exclude={a, b} |
                                  set(a.split()) | set(b.split()))
 
-        # Get context from corpus
-        a_info = self._get_first_sentence(a)
-        b_info = self._get_first_sentence(b)
+        # Get context from corpus (use subject-specific search, not code-heavy)
+        a_info = self._get_first_sentence(f"{a} programming language")
+        b_info = self._get_first_sentence(f"{b} programming language")
+        if not a_info:
+            a_info = self._get_first_sentence(a)
+        if not b_info:
+            b_info = self._get_first_sentence(b)
 
         trace.append(f"[Instruction] Compare: similarity={similarity:.3f}, "
                      f"shared={shared_words[:3]}")
 
-        # Build comparison
+        # Build comparison — use the instruction result, not retrieval
         parts = []
         if a_info:
             parts.append(f"{a.capitalize()}: {a_info}")
@@ -553,6 +564,14 @@ class InstructionFollower:
                 if len(s) > 15:
                     return s + '.'
         return None
+
+    def _is_code_response(self, text):
+        """Check if a response is code rather than natural language."""
+        code_indicators = ['def ', 'return ', 'import ', 'class ', 'for i in',
+                           'if (', '= []', '.append(', 'function ', 'var ',
+                           'console.', '"""', "'''", '```']
+        text_lower = text[:300].lower()
+        return sum(1 for c in code_indicators if c.lower() in text_lower) >= 2
 
     def _apply_constraints(self, result, constraints, trace):
         """Apply formatting constraints to the result."""

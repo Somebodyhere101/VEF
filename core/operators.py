@@ -28,10 +28,11 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class FusedOperators:
     """Computation through embedding-space transformations."""
 
-    def __init__(self, embeddings, tokenizer, data_dir=None, corpus=None):
+    def __init__(self, embeddings, tokenizer, data_dir=None, corpus=None, relations=None):
         self.embeddings = embeddings
         self.tokenizer = tokenizer
         self.dim = embeddings.dim
+        self.relations = relations  # Mined relationships from corpus
         # Corpus reference for corpus-based decoding
         self._corpus_embeds = corpus.q_embeds if corpus else None
         self._corpus_entries = corpus.entries if corpus else None
@@ -409,11 +410,21 @@ class FusedOperators:
             return None
 
         word = match.group(1)
+
+        # Check Relations module first — mined antonyms from corpus
+        if self.relations and hasattr(self.relations, 'antonyms'):
+            if word in self.relations.antonyms:
+                antonym = self.relations.antonyms[word]
+                if isinstance(antonym, (list, set)):
+                    antonym = list(antonym)[0]
+                trace.append(f"[Fused] Negation: {word} → {antonym} (Relations-mined)")
+                return f"The opposite of {word} is {antonym}."
+
         emb = self.embeddings.embed(word, self.tokenizer)
         if emb is None:
             return None
 
-        # Apply negation operator
+        # Apply negation operator (fallback to embedding arithmetic)
         neg_op = self.operators['negate']
         projection = np.dot(emb, neg_op)
         result_emb = emb + neg_op * abs(projection) * 2.0
@@ -527,6 +538,16 @@ class FusedOperators:
             return None
 
         instance = match.group(1)
+
+        # Check Relations module first — mined categories
+        if self.relations and hasattr(self.relations, 'categories'):
+            if instance in self.relations.categories:
+                cat = self.relations.categories[instance]
+                if isinstance(cat, (list, set)):
+                    cat = list(cat)[0]
+                trace.append(f"[Fused] Category: {instance} → {cat} (Relations-mined)")
+                return f"{instance.capitalize()} is a type of {cat}."
+
         emb = self.embeddings.embed(instance, self.tokenizer)
         if emb is None:
             return None
