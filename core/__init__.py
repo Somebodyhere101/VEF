@@ -2,6 +2,7 @@ from .config import Config, DEFAULT as DefaultConfig
 from .embeddings import Embeddings
 from .corpus import Corpus
 from .attention import Attention
+from .attention_v2 import AttentionV2
 from .relations import Relations
 from .refinement import Refinement
 from .awareness import Awareness
