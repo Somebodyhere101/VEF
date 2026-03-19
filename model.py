@@ -17,7 +17,7 @@ import numpy as np
 
 from tokenizers import Tokenizer
 
-from core import Embeddings, Corpus, Attention, Relations, Refinement, Awareness, FusedOperators, DeepFusion, WordDecoder
+from core import Embeddings, Corpus, Attention, Relations, Refinement, Awareness, FusedOperators, DeepFusion, WordDecoder, ComputeBasis
 from core.config import DEFAULT as CFG
 from reasoning import Retrieval, Introspection, Arithmetic, Composition, Decomposition, Understanding, Circuits
 from reasoning.boundary import BoundaryComposer, ComputationDelegate
@@ -82,6 +82,7 @@ class VEF:
             self.circuits = Circuits(self.embeddings, self.corpus, self.tokenizer, self.retrieval)
             self.boundary = BoundaryComposer(self.embeddings, self.corpus, self.tokenizer, self.awareness, self.retrieval)
             self.compute = ComputationDelegate()
+            self.compute_basis = ComputeBasis(self.embeddings, self.tokenizer, data_dir=data)
             self.decoder = WordDecoder(self.embeddings, self.corpus, self.tokenizer, data_dir=data)
             self.fused = FusedOperators(self.embeddings, self.tokenizer, data_dir=data, corpus=self.corpus, relations=self.relations)
             self.fused.decoder = self.decoder  # Inject decoder
@@ -157,14 +158,21 @@ class VEF:
             candidates.append((self._score(deep_result, q_emb) + 1.8,
                                deep_result, "Deep Fusion"))
 
+        # Compute Basis — W* maps English to operations, Python executes
+        # The basis determines WHAT to compute. Python provides precision.
+        # This is the true fusion: shared embedding space for language and computation.
+        cb_result, cb_used = self.compute_basis.compute(query, trace)
+        if cb_used and cb_result:
+            candidates.append((self._score(cb_result, q_emb) + 2.5,
+                               cb_result, "Compute Basis (W*)"))
+
         # Fused computation — single-step operators inside the embedding space
         fused_result, fused_used = self.fused.compute(query, trace)
         if fused_used and fused_result:
             candidates.append((self._score(fused_result, q_emb) + 1.5,
                                fused_result, "Fused Operator"))
 
-        # Computation delegation — deterministic Python execution (fallback)
-        # Gets a large bonus because computed answers are PROVABLY correct
+        # Computation delegation — regex-based Python execution (fallback)
         computed_delegate, delegate_used = self.compute.try_compute(query, trace)
         if delegate_used and computed_delegate:
             candidates.append((self._score(computed_delegate, q_emb) + 2.0,
