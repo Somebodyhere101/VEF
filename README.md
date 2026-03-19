@@ -1,6 +1,8 @@
+![VEF Banner](banner.png)
+
 # VEF — Language Model from Frozen Statistics
 
-A language model that **beats billion-parameter transformers** on public benchmarks — with **zero gradient descent**.
+A fully interpretable language model that competes with billion-parameter transformers on public benchmarks — with **zero gradient descent**.
 
 Built entirely from closed-form statistical operations on a text corpus: PPMI + SVD for embeddings, adaptive multi-signal retrieval, iterative refinement, co-substitution for relationship discovery, and basis/anti-basis awareness for hallucination detection. Every answer traces to a specific corpus entry. Every decision is interpretable. Trained in 35 minutes on a single GPU.
 
