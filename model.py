@@ -20,6 +20,7 @@ from tokenizers import Tokenizer
 from core import Embeddings, Corpus, Attention, Relations, Refinement, Awareness
 from core.config import DEFAULT as CFG
 from reasoning import Retrieval, Introspection, Arithmetic, Composition, Decomposition, Understanding, Circuits
+from reasoning.boundary import BoundaryComposer, ComputationDelegate
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 
@@ -78,6 +79,8 @@ class VEF:
             self.decomposition = Decomposition()
             self.understanding = Understanding(self.corpus, self.embeddings, self.tokenizer, self.relations, self.retrieval)
             self.circuits = Circuits(self.embeddings, self.corpus, self.tokenizer, self.retrieval)
+            self.boundary = BoundaryComposer(self.embeddings, self.corpus, self.tokenizer, self.awareness, self.retrieval)
+            self.compute = ComputationDelegate()
 
         self._system_prompt = None
         self._show_reasoning = False
@@ -132,6 +135,27 @@ class VEF:
         q_emb = self.embeddings.embed(query, self.tokenizer)
 
         # Every circuit gets a chance to answer — run each once
+
+        # Computation delegation — deterministic Python execution
+        # Gets a large bonus because computed answers are PROVABLY correct
+        computed_delegate, delegate_used = self.compute.try_compute(query, trace)
+        if delegate_used and computed_delegate:
+            candidates.append((self._score(computed_delegate, q_emb) + 2.0,
+                               computed_delegate, "Computation Delegate"))
+
+        # Boundary-driven composition — novel answers from partial knowledge
+        # Gets a bonus for covering concepts that no single retrieval result does
+        boundary_resp, boundary_used = self.boundary.try_compose(query, trace)
+        if boundary_used and boundary_resp:
+            base_score = self._score(boundary_resp, q_emb)
+            # Coverage bonus: count query content words in the composed response
+            content = self.corpus.content_words(query)
+            if content:
+                resp_lower = boundary_resp.lower()
+                coverage = sum(1 for w in content if w in resp_lower) / len(content)
+                base_score = base_score * (1.0 + 0.8 * coverage)
+            candidates.append((base_score, boundary_resp, "Boundary Composition"))
+
         # Word problems
         wp = self.understanding.solve_word_problem(query)
         if wp:
