@@ -1,5 +1,7 @@
 ![VEF Banner](banner.png)
 
+**THIS IS AN ACHIVED MISLEADING DOCUMENT**
+
 # VEF — Language Model from Frozen Statistics
 
 A fully interpretable language model built entirely from frozen statistics — **no gradient descent, no backpropagation, no training loop**.
