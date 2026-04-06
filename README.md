@@ -1,6 +1,6 @@
 ![VEF Banner](banner.png)
 
-**THIS IS AN ACHIVED MISLEADING DOCUMENT**
+**THIS IS AN ARCHIVED MISLEADING DOCUMENT**
 
 # VEF — Language Model from Frozen Statistics
 
